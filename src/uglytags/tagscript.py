@@ -16,7 +16,7 @@ import discord
 import regex
 
 from uglytags import components as component_tools
-from uglytags.db import StorageLimitError
+from uglytags.db import StorageLimitError, is_group, target_id
 from uglytags.mathexpr import MathError, evaluate
 from uglytags.media import (
     MediaError,
@@ -2097,6 +2097,11 @@ async def tag_function(rt, arg, tag):
     if not fetched or not rt.guild or fetched["guild_id"] != rt.guild.id:
         raise TagError("Cannot call this tag")
     await rt.db.use(fetched["id"])
+    if is_group(fetched):
+        fetched = await rt.db.random_member(target_id(fetched))
+        if fetched is None:
+            raise TagError("This group has no tags")
+        await rt.db.use(fetched["id"])
     old_tag = rt.tag
     old_variables = dict(tag.variables)
     same = bool(old_tag) and old_tag["id"] == fetched["id"]

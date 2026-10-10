@@ -39,6 +39,14 @@ delete button is left out.
   with an option to export them first.
 - `/tag export [content] [name] [user]`: exports matching tags as JSON.
 - `/tag import file`: imports a NotSoBot or UglyTags export.
+- `/tag group create name tag`, `/tag group add group tag`, and
+  `/tag group remove group tag`: manage tag groups. A group is a tag whose name runs a
+  random tag from the group, so `/t cats` posts one of the group's tags. Groups share
+  names with tags and work with `/tag info` (which lists the group's tags), `rename`,
+  `alias`, `remove`, `random`, and `{tag:ID}`. The group's owner and server
+  administrators can add or remove any of the server's tags, up to 100 per group.
+  Groups cannot contain other groups or have content of their own, and a deleted tag
+  leaves every group it was in.
 
 ### Permissions
 
@@ -147,11 +155,12 @@ the first argument of `includes`, `get`, `or`, and `iferror` is evaluated, and
 Exports use NotSoBot's format (`serverId`, `tags`, `options`, `timestamp`, and tag
 objects with `id`, `name`, `content`, `user.id`, `uses`, `created`, and
 `reference_tag`). Stored files are included as base64 in an extra `uglytags_files`
-field. Exporting an alias also exports the tag it points to. An export larger than
+field, and groups list their tag IDs in an extra `uglytags_group_members` field.
+Exporting an alias or group also exports the tags it points to. An export larger than
 the server's upload limit is refused; use filters to split it.
 
 Import accepts NotSoBot or UglyTags exports up to 50 MB. It keeps names, owners,
-uses, dates, aliases, and tag IDs (new IDs are assigned on collision).
+uses, dates, aliases, groups, and tag IDs (new IDs are assigned on collision).
 `{attach:...}` links to Discord attachments are downloaded into PostgreSQL, refreshing
 expired links through Discord, up to 500 links and 200 MB per import. Links that
 cannot be downloaded remain as links.
@@ -179,7 +188,8 @@ hostname of your PostgreSQL instance. No Docker installation is required on a
 development machine. Set optional `DISCORD_TEST_GUILD_ID` for immediate command
 registration in one server; otherwise commands are registered globally and may take
 time to propagate. Production should leave this unset. The bot creates its schema on
-startup. Back up the database before future schema upgrades.
+startup and applies migrations automatically, such as adding tag groups to a
+version one database. Back up the database before upgrading.
 
 ## Deployment
 

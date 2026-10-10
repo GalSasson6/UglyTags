@@ -8,15 +8,29 @@ from psycopg_pool import AsyncConnectionPool
 DISCORD_EPOCH = 1420070400000
 TAG_COLUMNS = """
     t.id, t.guild_id, t.name, t.content, t.owner_id, t.reference_id, t.uses,
-    t.created_at, t.edited_at, t.last_used_at,
-    r.name AS reference_name, r.content AS reference_content, r.owner_id AS reference_owner_id
+    t.created_at, t.edited_at, t.last_used_at, t.is_group,
+    r.name AS reference_name, r.content AS reference_content, r.owner_id AS reference_owner_id,
+    r.is_group AS reference_is_group
 """
 TAG_FROM = "tags t LEFT JOIN tags r ON r.id = t.reference_id"
 MAX_STORAGE_AMOUNT = 5
+MAX_GROUP_MEMBERS = 100
 
 
 class StorageLimitError(Exception):
     pass
+
+
+class GroupFullError(Exception):
+    pass
+
+
+def is_group(tag: dict) -> bool:
+    return bool(tag.get("is_group") or tag.get("reference_is_group"))
+
+
+def target_id(tag: dict) -> int:
+    return tag["reference_id"] or tag["id"]
 
 
 def new_id() -> int:
@@ -169,14 +183,72 @@ class Database:
             "UPDATE tags SET uses = uses + 1, last_used_at = now() WHERE id = %s", (tag_id,)
         )
 
-    async def autocomplete(self, guild_id: int, query: str, owner_id: int | None = None):
+    async def autocomplete(
+        self, guild_id: int, query: str, owner_id: int | None = None, groups: bool = False
+    ):
         where, params = filters(guild_id, query or None, None, owner_id)
+        if groups:
+            where += " AND t.is_group"
         cursor = await self.execute(
             f"""SELECT t.name FROM {TAG_FROM} WHERE {where}
                 ORDER BY lower(t.name) NOT LIKE lower(%s), t.uses DESC, lower(t.name) LIMIT 25""",
             [*params, f"{query}%"],
         )
         return [row["name"] for row in await cursor.fetchall()]
+
+    async def create_group(
+        self, group_id: int, guild_id: int, name: str, owner_id: int, member_id: int
+    ):
+        async with self.pool.connection() as connection, connection.transaction():
+            await connection.execute(
+                """INSERT INTO tags (id, guild_id, name, owner_id, is_group)
+                   VALUES (%s, %s, %s, %s, TRUE)""",
+                (group_id, guild_id, name, owner_id),
+            )
+            await connection.execute(
+                "INSERT INTO tag_group_members (group_id, tag_id) VALUES (%s, %s)",
+                (group_id, member_id),
+            )
+
+    async def add_member(self, group_id: int, tag_id: int) -> bool:
+        async with self.pool.connection() as connection, connection.transaction():
+            await connection.execute("SELECT 1 FROM tags WHERE id = %s FOR UPDATE", (group_id,))
+            cursor = await connection.execute(
+                "SELECT count(*) AS members FROM tag_group_members WHERE group_id = %s",
+                (group_id,),
+            )
+            if (await cursor.fetchone())["members"] >= MAX_GROUP_MEMBERS:
+                raise GroupFullError
+            cursor = await connection.execute(
+                """INSERT INTO tag_group_members (group_id, tag_id) VALUES (%s, %s)
+                   ON CONFLICT DO NOTHING RETURNING tag_id""",
+                (group_id, tag_id),
+            )
+            return await cursor.fetchone() is not None
+
+    async def remove_member(self, group_id: int, tag_id: int) -> bool:
+        cursor = await self.execute(
+            "DELETE FROM tag_group_members WHERE group_id = %s AND tag_id = %s",
+            (group_id, tag_id),
+        )
+        return cursor.rowcount > 0
+
+    async def group_members(self, group_id: int) -> list[dict]:
+        cursor = await self.execute(
+            """SELECT t.id, t.name FROM tag_group_members m JOIN tags t ON t.id = m.tag_id
+               WHERE m.group_id = %s ORDER BY lower(t.name)""",
+            (group_id,),
+        )
+        return await cursor.fetchall()
+
+    async def random_member(self, group_id: int):
+        cursor = await self.execute(
+            f"""SELECT {TAG_COLUMNS} FROM tag_group_members m
+                JOIN tags t ON t.id = m.tag_id LEFT JOIN tags r ON r.id = t.reference_id
+                WHERE m.group_id = %s ORDER BY random() LIMIT 1""",
+            (group_id,),
+        )
+        return await cursor.fetchone()
 
     async def file_names(self, tag_id: int) -> list[str]:
         cursor = await self.execute(
@@ -252,8 +324,8 @@ class Database:
                     continue
                 cursor = await connection.execute(
                     """INSERT INTO tags (id, guild_id, name, content, owner_id, reference_id,
-                           uses, created_at, edited_at, last_used_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                           uses, created_at, edited_at, last_used_at, is_group)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                        ON CONFLICT DO NOTHING RETURNING id""",
                     (
                         tag["id"],
@@ -266,6 +338,7 @@ class Database:
                         tag["created_at"],
                         tag["edited_at"],
                         tag["last_used_at"],
+                        tag["is_group"],
                     ),
                 )
                 if await cursor.fetchone() is None:
@@ -273,4 +346,20 @@ class Database:
                 imported.append(tag["name"])
                 imported_ids.add(tag["id"])
                 await self._store_files(connection, tag["id"], tag["files"], None)
+            group_ids = {tag["id"] for tag in tags if tag["is_group"]}
+            excluded = group_ids | {tag["id"] for tag in tags if tag["reference_id"] in group_ids}
+            for tag in tags:
+                if not tag["is_group"] or tag["id"] not in imported_ids:
+                    continue
+                members = [
+                    member
+                    for member in tag["members"]
+                    if member in imported_ids and member not in excluded
+                ]
+                for member in members[:MAX_GROUP_MEMBERS]:
+                    await connection.execute(
+                        """INSERT INTO tag_group_members (group_id, tag_id) VALUES (%s, %s)
+                           ON CONFLICT DO NOTHING""",
+                        (tag["id"], member),
+                    )
         return imported

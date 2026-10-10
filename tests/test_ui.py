@@ -22,6 +22,8 @@ def tag(**overrides):
         "uses": 0,
         "created_at": datetime.now(UTC),
         "edited_at": None,
+        "is_group": False,
+        "reference_is_group": None,
     }
     row.update(overrides)
     return row
@@ -306,3 +308,112 @@ async def test_export_includes_alias_targets():
     file = event.followup.send.await_args.kwargs["file"]
     names = [item["name"] for item in json.loads(file.fp.read())["tags"]]
     assert names == ["alias", "target"]
+
+
+def group_bot(tags_by_name, members=None):
+    bot = UglyTags("postgresql://localhost/test")
+    bot.db = SimpleNamespace(
+        get_tag=AsyncMock(side_effect=lambda guild, name: tags_by_name.get(name.lower())),
+        taken_names=AsyncMock(return_value=set()),
+        create_group=AsyncMock(),
+        add_member=AsyncMock(return_value=True),
+        remove_member=AsyncMock(return_value=True),
+        group_members=AsyncMock(return_value=members or []),
+        random_member=AsyncMock(),
+        use=AsyncMock(),
+        close=AsyncMock(),
+    )
+    return bot
+
+
+async def test_group_create_add_and_remove():
+    cat = tag(id=20, name="cat1")
+    cats = tag(id=30, name="cats", content="", is_group=True)
+    bot = group_bot({"cat1": cat})
+    event = interaction()
+    await command(bot, "group", "create")(event, "cats", "cat1")
+    args = bot.db.create_group.await_args.args
+    assert (args[1], args[2], args[3], args[4]) == (1, "cats", 2, 20)
+    assert "Created group `cats`" in event.response.send_message.await_args.args[0]
+
+    bot = group_bot({"cat1": cat, "cats": cats})
+    event = interaction()
+    await command(bot, "group", "create")(event, "cats", "cat1")
+    assert "`cats1`" in event.response.send_message.await_args.args[0]
+    bot.db.create_group.assert_not_awaited()
+
+    event = interaction()
+    await command(bot, "group", "add")(event, "cats", "cat1")
+    bot.db.add_member.assert_awaited_once_with(30, 20)
+    event = interaction()
+    await command(bot, "group", "remove")(event, "cats", "cat1")
+    bot.db.remove_member.assert_awaited_once_with(30, 20)
+    await bot.close()
+
+
+async def test_group_rules():
+    cats = tag(id=30, name="cats", content="", is_group=True, owner_id=3)
+    dogs = tag(id=31, name="dogs", content="", is_group=True)
+    plain = tag(id=20, name="plain")
+    bot = group_bot({"cats": cats, "dogs": dogs, "plain": plain})
+    event = interaction()
+    await command(bot, "group", "add")(event, "cats", "plain")
+    assert "not the owner" in event.response.send_message.await_args.args[0]
+    event = interaction(administrator=True)
+    await command(bot, "group", "add")(event, "cats", "dogs")
+    assert "cannot contain other groups" in event.response.send_message.await_args.args[0]
+    event = interaction()
+    await command(bot, "group", "add")(event, "plain", "dogs")
+    assert "not a group" in event.response.send_message.await_args.args[0]
+    event = interaction()
+    await command(bot, "edit")(event, "dogs", "text")
+    assert "no content" in event.response.send_message.await_args.args[0]
+    bot.db.add_member.assert_not_awaited()
+
+    bot.db.file_names = AsyncMock(return_value=[])
+    event = interaction()
+    await command(bot, "create")(event, "dogs", "text")
+    view = event.response.send_message.await_args.kwargs["view"]
+    assert [item.label for item in view.children] == ["Create as dogs1", "Cancel"]
+    await bot.close()
+
+
+async def test_showing_group_runs_random_member():
+    cats = tag(id=30, name="cats", content="", is_group=True)
+    bot = group_bot({"cats": cats})
+    bot.db.random_member.return_value = tag(id=20, name="cat1", content="meow")
+    event = interaction()
+    event.guild, event.channel, event.filesize_limit = None, None, 10_000_000
+    event.edit_original_response = AsyncMock()
+    await command_t(bot)(event, "cats", None, None)
+    bot.db.random_member.assert_awaited_once_with(30)
+    assert [call.args[0] for call in bot.db.use.await_args_list] == [30, 20]
+    assert event.edit_original_response.await_args.kwargs["content"] == "meow"
+
+    bot.db.random_member.return_value = None
+    event.edit_original_response.reset_mock()
+    await command_t(bot)(event, "cats", None, None)
+    assert "no tags" in event.edit_original_response.await_args.kwargs["content"]
+    await bot.close()
+
+
+def command_t(bot):
+    return bot.tree.get_command("t").callback
+
+
+async def test_export_includes_group_members():
+    cats = tag(id=30, name="cats", content="", is_group=True)
+    cat = tag(id=20, name="cat1")
+    for row in (cats, cat):
+        row.update(reference_owner_id=None, last_used_at=None)
+    db = SimpleNamespace(
+        get_tag_by_id=AsyncMock(return_value=cat),
+        group_members=AsyncMock(return_value=[{"id": 20, "name": "cat1"}]),
+        file_names=AsyncMock(return_value=[]),
+    )
+    event = interaction()
+    event.filesize_limit = 20_000_000
+    await send_export(SimpleNamespace(db=db), event, [cats], {})
+    exported = json.loads(event.followup.send.await_args.kwargs["file"].fp.read())["tags"]
+    assert [item["name"] for item in exported] == ["cats", "cat1"]
+    assert exported[0]["uglytags_group_members"] == ["20"]

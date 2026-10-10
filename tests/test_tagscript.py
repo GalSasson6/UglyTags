@@ -20,6 +20,10 @@ class FakeDB:
     async def get_tag_by_id(self, tag_id):
         return self.tags.get(tag_id)
 
+    async def random_member(self, group_id):
+        members = self.tags[group_id].get("members", [])
+        return self.tags[members[0]] if members else None
+
     async def file(self, tag_id, filename):
         return self.files.get((tag_id, filename))
 
@@ -232,6 +236,20 @@ async def test_nested_tag_runs_with_its_own_arguments():
     db.tags[loop["id"]] = loop
     with pytest.raises(TagError, match="too many tag executions"):
         await run("{tag:555555555555555555}", rt=rt)
+
+
+async def test_nested_group_runs_a_member():
+    member = make_tag(333333333333333333, "member:{tagname}", name="member")
+    group = make_tag(666666666666666666, name="group")
+    group.update(is_group=True, members=[member["id"]])
+    empty = make_tag(777777777777777777, name="empty")
+    empty.update(is_group=True)
+    db = FakeDB([member, group, empty])
+    rt = runtime(db)
+    assert await run("{tag:666666666666666666}", rt=rt) == "member:member"
+    assert [call.args[0] for call in db.use.await_args_list] == [group["id"], member["id"]]
+    with pytest.raises(TagError, match="no tags"):
+        await run("{tag:777777777777777777}", rt=rt)
 
 
 async def test_stored_and_text_attachments():

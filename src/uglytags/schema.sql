@@ -31,3 +31,29 @@ CREATE TABLE IF NOT EXISTS tag_variables (
     value TEXT NOT NULL CHECK (length(value) <= 16384),
     PRIMARY KEY (tag_id, scope, storage_id, name)
 );
+
+-- Migration 2: tag groups. A group is a tag with no content that runs a random member.
+ALTER TABLE tags ADD COLUMN IF NOT EXISTS is_group BOOLEAN NOT NULL DEFAULT FALSE;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'tags'::regclass AND conname = 'tags_kind_check'
+    ) THEN
+        ALTER TABLE tags DROP CONSTRAINT IF EXISTS tags_check;
+        ALTER TABLE tags ADD CONSTRAINT tags_kind_check CHECK (
+            CASE WHEN is_group THEN reference_id IS NULL AND content = ''
+            ELSE (reference_id IS NULL) = (content <> '') END
+        );
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS tag_group_members (
+    group_id BIGINT NOT NULL REFERENCES tags ON DELETE CASCADE,
+    tag_id BIGINT NOT NULL REFERENCES tags ON DELETE CASCADE,
+    PRIMARY KEY (group_id, tag_id),
+    CHECK (group_id <> tag_id)
+);
+
+CREATE INDEX IF NOT EXISTS tag_group_members_tag ON tag_group_members (tag_id);

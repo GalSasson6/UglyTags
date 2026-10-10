@@ -30,6 +30,7 @@ MAX_IMPORT_BYTES = 50_000_000
 MAX_IMPORT_DOWNLOAD_BYTES = 200_000_000
 MAX_IMPORT_DOWNLOADS = 500
 FILES_KEY = "uglytags_files"
+GROUP_KEY = "uglytags_group_members"
 
 
 class TransferError(Exception):
@@ -53,8 +54,13 @@ def _iso(value) -> str | None:
 
 
 def export_payload(
-    guild_id: int, tags: list[dict], files: dict[int, dict[str, bytes]], options: dict
+    guild_id: int,
+    tags: list[dict],
+    files: dict[int, dict[str, bytes]],
+    options: dict,
+    groups: dict[int, list[int]] | None = None,
 ) -> tuple[str, bytes]:
+    groups = groups or {}
     exported = []
     for tag in tags:
         reference = None
@@ -90,6 +96,8 @@ def export_payload(
                 ],
             }
         )
+        if tag.get("is_group"):
+            exported[-1][GROUP_KEY] = [str(member) for member in groups.get(tag["id"], [])]
     options = {key: value for key, value in options.items() if value}
     timestamp = int(time.time() * 1000)
     if options:
@@ -153,9 +161,16 @@ def _entry(raw) -> dict | None:
     reference = raw.get("reference_tag") if isinstance(raw.get("reference_tag"), dict) else None
     reference_id = _snowflake(reference.get("id")) if reference else None
     content = raw.get("content") if isinstance(raw.get("content"), str) else ""
+    members = raw.get(GROUP_KEY)
     if not 0 < len(name) <= MAX_NAME or owner_id is None:
         return None
-    if reference:
+    if members is not None:
+        if not isinstance(members, list) or reference or content:
+            return None
+        members = [_snowflake(member) for member in members]
+        if None in members:
+            return None
+    elif reference:
         if reference_id is None:
             return None
         content = ""
@@ -182,6 +197,8 @@ def _entry(raw) -> dict | None:
         "edited_at": _time(raw.get("edited")),
         "last_used_at": _time(raw.get("last_used")),
         "files": files,
+        "is_group": members is not None,
+        "members": members or [],
     }
 
 
@@ -260,6 +277,7 @@ async def import_tags(bot, guild_id: int, data: bytes) -> ImportReport:
     for entry in valid:
         if entry["reference_id"] in remapped:
             entry["reference_id"] = remapped[entry["reference_id"]]
+        entry["members"] = [remapped.get(member, member) for member in entry["members"]]
     imported = await bot.db.import_tags(guild_id, valid)
     report.imported = len(imported)
     report.skipped = len(valid) - len(imported)

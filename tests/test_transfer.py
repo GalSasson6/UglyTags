@@ -183,3 +183,51 @@ async def test_import_remaps_taken_ids(monkeypatch):
     assert entries[0]["id"] != 111111111111111111
     assert entries[1]["reference_id"] == entries[0]["id"]
     assert (report.imported, report.skipped, report.invalid) == (2, 0, 0)
+
+
+def test_groups_round_trip():
+    group = tag_row(id=444444444444444444, name="cats", content="", is_group=True)
+    member = tag_row()
+    _, data = transfer.export_payload(
+        9, [group, member], {}, {}, {444444444444444444: [111111111111111111]}
+    )
+    report = transfer.ImportReport()
+    entries = transfer.parse_entries(data, report)
+    assert entries[0]["is_group"] and entries[0]["members"] == [111111111111111111]
+    assert not entries[1]["is_group"] and entries[1]["members"] == []
+    owner = {"id": "222222222222222222"}
+    bad = json.dumps(
+        [
+            {"name": "x", "content": "text", "user": owner, transfer.GROUP_KEY: []},
+            {"name": "y", "user": owner, transfer.GROUP_KEY: ["nope"]},
+        ]
+    ).encode()
+    assert transfer.parse_entries(bad, report) == []
+
+
+async def test_import_remaps_group_members():
+    data = json.dumps(
+        [
+            {
+                "id": "111111111111111111",
+                "name": "a",
+                "content": "x",
+                "user": {"id": "222222222222222222"},
+            },
+            {
+                "id": "333333333333333333",
+                "name": "g",
+                "content": "",
+                "user": {"id": "222222222222222222"},
+                transfer.GROUP_KEY: ["111111111111111111"],
+            },
+        ]
+    ).encode()
+    db = SimpleNamespace(
+        existing_ids=AsyncMock(return_value={111111111111111111}),
+        import_tags=AsyncMock(return_value=["a", "g"]),
+    )
+    bot = SimpleNamespace(db=db, http=None, session=None, max_media_bytes=10)
+    await transfer.import_tags(bot, 9, data)
+    entries = db.import_tags.await_args.args[1]
+    assert entries[1]["members"] == [entries[0]["id"]] != [111111111111111111]

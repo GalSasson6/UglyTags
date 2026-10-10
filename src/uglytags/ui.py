@@ -7,7 +7,7 @@ import psycopg
 from discord import app_commands
 
 from uglytags import render, tagscript
-from uglytags.db import new_id
+from uglytags.db import MAX_GROUP_MEMBERS, GroupFullError, is_group, new_id, target_id
 from uglytags.i18n import t
 from uglytags.media import (
     MAX_FILES,
@@ -126,6 +126,8 @@ async def save_tag(
     current = await bot.db.get_tag(guild_id, name)
     if current and not can_overwrite(interaction, current):
         return t("error.tag_exists")
+    if current and is_group(current):
+        return t("error.group_content")
     if (current and current["id"]) != (expected and expected["id"]):
         return t("error.tag_changed")
     existing = await bot.db.file_names(current["id"]) if current else []
@@ -162,6 +164,14 @@ async def execute(
     if not interaction.response.is_done():
         await interaction.response.defer(thinking=True)
     await bot.db.use(tag["id"])
+    if is_group(tag):
+        tag = await bot.db.random_member(target_id(tag))
+        if tag is None:
+            await render.send_error(
+                interaction, "\n\n".join(part for part in (title, t("error.group_empty")) if part)
+            )
+            return
+        await bot.db.use(tag["id"])
     rt = tagscript.Runtime(
         client=bot,
         guild=interaction.guild,
@@ -181,10 +191,17 @@ async def execute(
     await render.send_result(interaction, rt, result, title)
 
 
-def info_embed(tag: dict, file_names: list[str]) -> discord.Embed:
+def info_embed(
+    tag: dict, file_names: list[str], members: list[dict] | None = None
+) -> discord.Embed:
     embed = discord.Embed(title=tag["name"][:256], colour=discord.Colour.blurple())
     if tag["reference_id"]:
         embed.description = t("info.alias", name=code(tag["reference_name"]))
+    elif tag["is_group"]:
+        names = ", ".join(code(member["name"]) for member in members or [])
+        embed.description = t(
+            "info.group", count=len(members or []), tags=names or t("info.group_none")
+        )[:4096]
     else:
         embed.description = "```\n" + tag["content"].replace("```", "`\u200b``")[:4000] + "\n```"
     lines = [t("info.created", time=timestamp(tag["created_at"]))]
@@ -400,17 +417,26 @@ def scope_text(user) -> str:
 async def send_export(bot, interaction: discord.Interaction, tags: list, options: dict):
     tags = list(tags)
     included = {tag["id"] for tag in tags}
-    for tag in list(tags):
-        if tag["reference_id"] and tag["reference_id"] not in included:
-            target = await bot.db.get_tag_by_id(tag["reference_id"])
-            if target:
-                tags.append(target)
-                included.add(target["id"])
+    groups = {}
+    index = 0
+    while index < len(tags):
+        tag = tags[index]
+        index += 1
+        dependencies = [tag["reference_id"]] if tag["reference_id"] else []
+        if tag["is_group"]:
+            groups[tag["id"]] = [member["id"] for member in await bot.db.group_members(tag["id"])]
+            dependencies += groups[tag["id"]]
+        for dependency in dependencies:
+            if dependency not in included:
+                target = await bot.db.get_tag_by_id(dependency)
+                if target:
+                    tags.append(target)
+                    included.add(target["id"])
     files = {}
     for tag in tags:
         names = await bot.db.file_names(tag["id"])
         files[tag["id"]] = {name: await bot.db.file(tag["id"], name) for name in names}
-    filename, data = export_payload(interaction.guild_id, tags, files, options)
+    filename, data = export_payload(interaction.guild_id, tags, files, options, groups)
     if len(data) > interaction.filesize_limit:
         await reply(interaction, t("error.export_size"))
         return
@@ -471,7 +497,7 @@ def register_commands(bot):
         tag = await bot.db.get_tag(interaction.guild_id, name)
         if tag:
             suggestion = await available_name(bot, interaction.guild_id, name)
-            allowed = can_overwrite(interaction, tag)
+            allowed = can_overwrite(interaction, tag) and not is_group(tag)
             view = CreateConflict(
                 bot,
                 interaction.user.id,
@@ -479,7 +505,9 @@ def register_commands(bot):
                 suggestion,
                 None if content is None else content.strip(),
             )
-            if tag["owner_id"] == interaction.user.id:
+            if is_group(tag):
+                key = "create.conflict_group"
+            elif tag["owner_id"] == interaction.user.id:
                 key = "create.conflict_own"
             else:
                 key = "create.conflict_admin" if allowed else "create.conflict_other"
@@ -512,6 +540,9 @@ def register_commands(bot):
             return
         if not can_overwrite(interaction, tag):
             await reply(interaction, t("error.not_owner"))
+            return
+        if is_group(tag):
+            await reply(interaction, t("error.group_content"))
             return
         if content is None:
             await interaction.response.send_modal(
@@ -589,7 +620,109 @@ def register_commands(bot):
         tag = await find(interaction, name)
         if tag:
             names = await bot.db.file_names(tag["reference_id"] or tag["id"])
-            await interaction.response.send_message(embed=info_embed(tag, names), ephemeral=True)
+            members = await bot.db.group_members(tag["id"]) if tag["is_group"] else None
+            await interaction.response.send_message(
+                embed=info_embed(tag, names, members), ephemeral=True
+            )
+
+    group_group = app_commands.Group(name="group", description=t("command.group"), parent=group)
+
+    async def group_tags(interaction: discord.Interaction, current: str):
+        names = await bot.db.autocomplete(interaction.guild_id, current, groups=True)
+        return [app_commands.Choice(name=name, value=name) for name in names]
+
+    async def group_member_tags(interaction: discord.Interaction, current: str):
+        group_name = clean_name(getattr(interaction.namespace, "group", None) or "")
+        target = await bot.db.get_tag(interaction.guild_id, group_name) if group_name else None
+        if not target or not target["is_group"]:
+            return []
+        members = await bot.db.group_members(target["id"])
+        lowered = current.lower()
+        return [
+            app_commands.Choice(name=member["name"], value=member["name"])
+            for member in members
+            if lowered in member["name"].lower()
+        ][:25]
+
+    async def managed_group(interaction: discord.Interaction, name: str):
+        target = await find(interaction, name)
+        if target is None:
+            return None
+        if not target["is_group"]:
+            await reply(interaction, t("error.not_group", name=code(target["name"])))
+            return None
+        if not can_overwrite(interaction, target):
+            await reply(interaction, t("error.not_owner"))
+            return None
+        return target
+
+    async def group_member(interaction: discord.Interaction, name: str):
+        member = await find(interaction, name)
+        if member is not None and is_group(member):
+            await reply(interaction, t("error.group_in_group"))
+            return None
+        return member
+
+    @group_group.command(name="create", description=t("command.group_create"))
+    @app_commands.describe(name=t("option.new_name"), tag=t("option.group_first_tag"))
+    @app_commands.autocomplete(tag=all_tags)
+    async def group_create(interaction: discord.Interaction, name: str, tag: str):
+        name = valid_name(name)
+        if name is None:
+            await reply(interaction, t("error.name", limit=MAX_NAME))
+            return
+        member = await group_member(interaction, tag)
+        if member is None:
+            return
+        if await bot.db.get_tag(interaction.guild_id, name):
+            suggestion = await available_name(bot, interaction.guild_id, name)
+            await reply(
+                interaction,
+                t("error.group_name_taken", name=code(name), suggestion=code(suggestion)),
+            )
+            return
+        try:
+            await bot.db.create_group(
+                new_id(), interaction.guild_id, name, interaction.user.id, member["id"]
+            )
+        except psycopg.errors.UniqueViolation:
+            await reply(interaction, t("error.tag_exists"))
+            return
+        await reply(
+            interaction, t("result.group_created", name=code(name), tag=code(member["name"]))
+        )
+
+    @group_group.command(name="add", description=t("command.group_add"))
+    @app_commands.describe(group=t("option.group"), tag=t("option.group_add_tag"))
+    @app_commands.autocomplete(group=group_tags, tag=all_tags)
+    async def group_add(interaction: discord.Interaction, group: str, tag: str):
+        target = await managed_group(interaction, group)
+        if target is None:
+            return
+        member = await group_member(interaction, tag)
+        if member is None:
+            return
+        try:
+            added = await bot.db.add_member(target["id"], member["id"])
+        except GroupFullError:
+            await reply(interaction, t("error.group_full", limit=MAX_GROUP_MEMBERS))
+            return
+        key = "result.group_added" if added else "error.group_has_tag"
+        await reply(interaction, t(key, name=code(target["name"]), tag=code(member["name"])))
+
+    @group_group.command(name="remove", description=t("command.group_remove"))
+    @app_commands.describe(group=t("option.group"), tag=t("option.group_remove_tag"))
+    @app_commands.autocomplete(group=group_tags, tag=group_member_tags)
+    async def group_remove(interaction: discord.Interaction, group: str, tag: str):
+        target = await managed_group(interaction, group)
+        if target is None:
+            return
+        member = await find(interaction, tag)
+        if member is None:
+            return
+        removed = await bot.db.remove_member(target["id"], member["id"])
+        key = "result.group_removed" if removed else "error.group_missing_tag"
+        await reply(interaction, t(key, name=code(target["name"]), tag=code(member["name"])))
 
     @group.command(name="random", description=t("command.random"))
     @app_commands.describe(

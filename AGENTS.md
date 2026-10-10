@@ -81,8 +81,9 @@ For multi-step tasks, state a brief plan:
 	general URL fetching.
 - Store tag files in PostgreSQL, enforce `MAX_MEDIA_MB` and 10 files per tag, and never
 	trust uploaded filenames.
-- Add explicit migration steps before changing an existing database schema; startup
-	currently initializes version one's tables with idempotent DDL.
+- Add explicit migration steps before changing an existing database schema. `schema.sql`'s
+	version one DDL is followed by numbered, idempotent migration blocks that startup runs
+	under an advisory lock; never edit an earlier block, add a new one.
 - Keep secrets out of logs, source, and images. Commit `.env.example`, never `.env`.
 - Do not install or run Docker on the local development machine. Containers are for
 	deployment hosts and CI only.

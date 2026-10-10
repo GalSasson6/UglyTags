@@ -2,6 +2,7 @@ import asyncio
 import os
 import uuid
 from datetime import UTC, datetime
+from importlib.resources import files
 
 import psycopg
 import pytest
@@ -9,7 +10,13 @@ import pytest_asyncio
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
 
-from uglytags.db import Database, StorageLimitError, new_id
+from uglytags.db import (
+    MAX_GROUP_MEMBERS,
+    Database,
+    GroupFullError,
+    StorageLimitError,
+    new_id,
+)
 
 
 @pytest_asyncio.fixture
@@ -112,11 +119,11 @@ async def test_import_skips_conflicts_and_orphan_aliases(db):
     await db.create_tag(new_id(), 1, "taken", "x", 7)
     now = datetime.now(UTC)
 
-    def entry(tag_id, name, content="body", reference_id=None, files=None):
+    def entry(tag_id, name, content="body", reference_id=None, files=None, members=None):
         return {
             "id": tag_id,
             "name": name,
-            "content": content,
+            "content": "" if members is not None else content,
             "owner_id": 7,
             "reference_id": reference_id,
             "uses": 2,
@@ -124,9 +131,12 @@ async def test_import_skips_conflicts_and_orphan_aliases(db):
             "edited_at": None,
             "last_used_at": None,
             "files": files or {},
+            "is_group": members is not None,
+            "members": members or [],
         }
 
     first, taken, alias, orphan = new_id(), new_id(), new_id(), new_id()
+    group, group_alias = new_id(), new_id()
     imported = await db.import_tags(
         1,
         [
@@ -134,10 +144,81 @@ async def test_import_skips_conflicts_and_orphan_aliases(db):
             entry(first, "first", "{attach:a.txt}", files={"a.txt": b"a"}),
             entry(taken, "TAKEN"),
             entry(orphan, "orphan", "", taken),
+            entry(group, "group", members=[first, alias, taken, group_alias, group]),
+            entry(group_alias, "group alias", "", group),
         ],
     )
-    assert imported == ["first", "alias"]
+    assert imported == ["first", "group", "alias", "group alias"]
     assert await db.file(first, "a.txt") == b"a"
     assert (await db.get_tag(1, "alias"))["reference_content"] == "{attach:a.txt}"
     assert await db.existing_ids([first, orphan]) == {first}
     assert await db.taken_names(1, ["FIRST", "Alias-2", "taken"]) == {"first", "taken"}
+    assert [member["name"] for member in await db.group_members(group)] == ["alias", "first"]
+
+
+async def test_groups(db):
+    first, second, group = new_id(), new_id(), new_id()
+    await db.create_tag(first, 1, "cat1", "meow", 7)
+    await db.create_tag(second, 1, "cat2", "purr", 8)
+    await db.create_group(group, 1, "Cats", 7, first)
+    row = await db.get_tag(1, "cats")
+    assert (row["is_group"], row["content"], row["reference_id"]) == (True, "", None)
+    assert await db.add_member(group, second)
+    assert not await db.add_member(group, second)
+    assert await db.autocomplete(1, "", groups=True) == ["Cats"]
+    assert (await db.random_member(group))["name"] in {"cat1", "cat2"}
+    alias = new_id()
+    await db.save_alias(alias, 1, "kitties", 7, group)
+    assert (await db.get_tag(1, "kitties"))["reference_is_group"]
+    await db.delete(second)
+    assert [member["name"] for member in await db.group_members(group)] == ["cat1"]
+    assert await db.remove_member(group, first)
+    assert not await db.remove_member(group, first)
+    assert await db.random_member(group) is None
+    with pytest.raises(psycopg.errors.CheckViolation):
+        await db.execute("UPDATE tags SET content = 'x' WHERE id = %s", (group,))
+    for index in range(MAX_GROUP_MEMBERS):
+        member = new_id()
+        await db.create_tag(member, 1, f"m{index}", "x", 7)
+        await db.add_member(group, member)
+    extra = new_id()
+    await db.create_tag(extra, 1, "extra", "x", 7)
+    with pytest.raises(GroupFullError):
+        await db.add_member(group, extra)
+
+
+async def test_migrates_version_one_schema():
+    url = os.environ.get("TEST_DATABASE_URL")
+    if not url:
+        pytest.skip("TEST_DATABASE_URL is not set")
+    schema = "test_" + uuid.uuid4().hex
+    connection = await psycopg.AsyncConnection.connect(url, autocommit=True)
+    await connection.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    conninfo = make_conninfo(url, options=f"-c search_path={schema}")
+    try:
+        version_one = (
+            files("uglytags").joinpath("schema.sql").read_text().split("-- Migration 2")[0]
+        )
+        async with await psycopg.AsyncConnection.connect(conninfo, autocommit=True) as old:
+            await old.execute(version_one)
+            await old.execute(
+                """INSERT INTO tags (id, guild_id, name, content, owner_id)
+                   VALUES (1, 1, 'old', 'x', 7)"""
+            )
+        database = Database(conninfo)
+        try:
+            await database.open()
+            await database.open()
+            assert (await database.get_tag(1, "old"))["is_group"] is False
+            cursor = await database.execute(
+                """SELECT conname FROM pg_constraint
+                   WHERE conrelid = 'tags'::regclass AND contype = 'c'"""
+            )
+            names = {row["conname"] for row in await cursor.fetchall()}
+            assert "tags_check" not in names and "tags_kind_check" in names
+            await database.create_group(2, 1, "group", 7, 1)
+        finally:
+            await database.close()
+    finally:
+        await connection.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+        await connection.close()
