@@ -14,6 +14,7 @@ log = logging.getLogger(__name__)
 COMPONENT_TIMEOUT = 60
 PAGE_TIMEOUT = 300
 MAX_V2_COMPONENTS = 40
+TRASH_EMOJI = "\U0001f5d1\ufe0f"
 
 
 @dataclass
@@ -52,6 +53,45 @@ def emoji(data: dict | None):
     )
 
 
+class DeleteButton(
+    discord.ui.DynamicItem[discord.ui.Button], template=r"uglytags:delete:(?P<user>\d+)"
+):
+    def __init__(self, user_id: int, row: int | None = None):
+        self.user_id = user_id
+        super().__init__(
+            discord.ui.Button(
+                style=discord.ButtonStyle.danger,
+                emoji=TRASH_EMOJI,
+                custom_id=f"uglytags:delete:{user_id}",
+                row=row,
+            )
+        )
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls(int(match["user"]))
+
+    async def callback(self, interaction: discord.Interaction):
+        permissions = getattr(interaction.user, "guild_permissions", discord.Permissions.none())
+        if interaction.user.id != self.user_id and not permissions.administrator:
+            await interaction.response.send_message(t("error.delete_owner"), ephemeral=True)
+            return
+        await interaction.response.defer()
+        if self.view is not None:
+            self.view.stop()
+        try:
+            await interaction.delete_original_response()
+        except discord.HTTPException:
+            await interaction.message.delete()
+        await interaction.followup.send(t("result.deleted"), ephemeral=True)
+
+
+def delete_view(user_id: int) -> discord.ui.View:
+    view = discord.ui.View(timeout=None)
+    view.add_item(DeleteButton(user_id))
+    return view
+
+
 class ComponentSession:
     def __init__(self, rt: tagscript.Runtime, result: tagscript.TagResult, editor):
         self.rt = rt
@@ -68,14 +108,18 @@ class ComponentSession:
 
     def _build(self, content: str) -> discord.ui.View | discord.ui.LayoutView:
         items = self.result.components["components"]
+        owner_id = self.rt.user.id
         if kinds.is_v2(items):
-            if content and kinds.count_components(items) >= MAX_V2_COMPONENTS:
+            total = kinds.count_components(items) + bool(content)
+            if total > MAX_V2_COMPONENTS:
                 raise tagscript.TagError("Messages can contain at most 40 components")
             view = SessionLayoutView(self)
             if content:
                 view.add_item(discord.ui.TextDisplay(content[:4000]))
             for data in items:
                 view.add_item(self.v2_item(data))
+            if total + 2 <= MAX_V2_COMPONENTS:
+                view.add_item(discord.ui.ActionRow(DeleteButton(owner_id)))
         else:
             view = SessionView(self)
             row = 0
@@ -86,6 +130,10 @@ class ComponentSession:
                     row += 1
                 else:
                     view.add_item(self.interactive(data, None))
+            try:
+                view.add_item(DeleteButton(owner_id, row if 0 < row < 5 else None))
+            except ValueError:
+                log.debug("No room for the delete button")
         self.view = view
         return view
 
@@ -234,7 +282,7 @@ class ComponentSession:
                 content=t("show.component_error", error=message)[:2000],
                 embeds=[],
                 attachments=[],
-                view=None,
+                view=delete_view(self.rt.user.id),
             )
         except discord.HTTPException:
             log.warning("Could not report component failure")
@@ -257,7 +305,7 @@ class ComponentSession:
                 self.disable()
                 await self.editor(view=self.view)
             else:
-                await self.editor(view=None)
+                await self.editor(view=delete_view(self.rt.user.id))
         except tagscript.TagError as error:
             await self.fail(str(error))
         except discord.HTTPException:
@@ -320,6 +368,7 @@ class Paginator(discord.ui.View):
         self.title = title
         self.index = 0
         self.editor = None
+        self.add_item(DeleteButton(owner_id, 1))
         self.update_buttons()
 
     def update_buttons(self):
@@ -339,6 +388,8 @@ class Paginator(discord.ui.View):
         }
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if (interaction.data or {}).get("custom_id", "").startswith("uglytags:delete:"):
+            return True
         if interaction.user.id != self.owner_id:
             await interaction.response.send_message(t("error.owner"), ephemeral=True)
             return False
@@ -372,7 +423,7 @@ class Paginator(discord.ui.View):
     async def on_timeout(self):
         if self.editor:
             try:
-                await self.editor(view=None)
+                await self.editor(view=delete_view(self.owner_id))
             except discord.HTTPException:
                 log.debug("Could not remove paginator buttons")
 
@@ -392,6 +443,8 @@ def prepare(rt: tagscript.Runtime, result: tagscript.TagResult, title: str = "",
     if has_components:
         session = ComponentSession(rt, result, editor)
         prepared.view = session.build(content)
+    else:
+        prepared.view = delete_view(rt.user.id)
     if isinstance(prepared.view, discord.ui.LayoutView):
         return prepared
     prepared.content = content[:2000] or None
@@ -405,8 +458,7 @@ async def send_result(interaction: discord.Interaction, rt, result, title: str =
     try:
         prepared = prepare(rt, result, title, interaction.edit_original_response)
     except tagscript.TagError as error:
-        content = "\n\n".join(part for part in (title, str(error)) if part)
-        await interaction.edit_original_response(content=content[:2000])
+        await send_error(interaction, "\n\n".join(part for part in (title, str(error)) if part))
         return
     try:
         await interaction.edit_original_response(**prepared.edit_kwargs())
@@ -418,6 +470,13 @@ async def send_result(interaction: discord.Interaction, rt, result, title: str =
             message = t("error.too_large")
         else:
             message = t("error.send", error=error.text or error.status)
-        await interaction.edit_original_response(
-            content=message[:2000], embeds=[], attachments=[], view=None
-        )
+        await send_error(interaction, message)
+
+
+async def send_error(interaction: discord.Interaction, message: str):
+    await interaction.edit_original_response(
+        content=message[:2000],
+        embeds=[],
+        attachments=[],
+        view=delete_view(interaction.user.id),
+    )

@@ -1,5 +1,6 @@
 import io
 import logging
+import re
 
 import discord
 import psycopg
@@ -55,6 +56,10 @@ def code(value: str) -> str:
 
 def permissions(interaction: discord.Interaction) -> discord.Permissions:
     return getattr(interaction.user, "guild_permissions", discord.Permissions.none())
+
+
+def can_overwrite(interaction: discord.Interaction, tag: dict) -> bool:
+    return tag["owner_id"] == interaction.user.id or permissions(interaction).administrator
 
 
 def timestamp(value) -> str:
@@ -119,7 +124,7 @@ async def save_tag(
 ) -> str:
     guild_id, user_id = interaction.guild_id, interaction.user.id
     current = await bot.db.get_tag(guild_id, name)
-    if current and current["owner_id"] != user_id:
+    if current and not can_overwrite(interaction, current):
         return t("error.tag_exists")
     if (current and current["id"]) != (expected and expected["id"]):
         return t("error.tag_changed")
@@ -169,8 +174,9 @@ async def execute(
     try:
         result = await tagscript.parse(rt, tag_content(tag), arguments)
     except tagscript.TagError as error:
-        content = "\n\n".join(part for part in (title, str(error)) if part)
-        await interaction.edit_original_response(content=content[:2000])
+        await render.send_error(
+            interaction, "\n\n".join(part for part in (title, str(error)) if part)
+        )
         return
     await render.send_result(interaction, rt, result, title)
 
@@ -212,10 +218,12 @@ class OwnedView(discord.ui.View):
 
 
 def name_candidates(name: str, count: int = 100) -> list[str]:
+    match = re.fullmatch(r"(.*?)(\d+)", name, re.DOTALL)
+    base, start = (match[1], int(match[2]) + 1) if match else (name, 1)
     candidates = []
-    for number in range(1, count + 1):
+    for number in range(start, start + count):
         suffix = str(number)
-        candidates.append(name[: MAX_NAME - len(suffix)] + suffix)
+        candidates.append(base[: MAX_NAME - len(suffix)] + suffix)
     return candidates
 
 
@@ -423,7 +431,8 @@ def register_commands(bot):
         return [app_commands.Choice(name=name, value=name) for name in names]
 
     async def own_tags(interaction: discord.Interaction, current: str):
-        names = await bot.db.autocomplete(interaction.guild_id, current, interaction.user.id)
+        owner_id = None if permissions(interaction).administrator else interaction.user.id
+        names = await bot.db.autocomplete(interaction.guild_id, current, owner_id)
         return [app_commands.Choice(name=name, value=name) for name in names]
 
     async def find(interaction: discord.Interaction, name: str):
@@ -462,17 +471,25 @@ def register_commands(bot):
         tag = await bot.db.get_tag(interaction.guild_id, name)
         if tag:
             suggestion = await available_name(bot, interaction.guild_id, name)
-            owned = tag["owner_id"] == interaction.user.id
+            allowed = can_overwrite(interaction, tag)
             view = CreateConflict(
                 bot,
                 interaction.user.id,
-                tag if owned else None,
+                tag if allowed else None,
                 suggestion,
                 None if content is None else content.strip(),
             )
-            key = "create.conflict_own" if owned else "create.conflict_other"
+            if tag["owner_id"] == interaction.user.id:
+                key = "create.conflict_own"
+            else:
+                key = "create.conflict_admin" if allowed else "create.conflict_other"
             await interaction.response.send_message(
-                t(key, name=code(tag["name"]), suggestion=code(suggestion)),
+                t(
+                    key,
+                    name=code(tag["name"]),
+                    suggestion=code(suggestion),
+                    owner=f"<@{tag['owner_id']}>",
+                ),
                 view=view,
                 ephemeral=True,
             )
@@ -493,7 +510,7 @@ def register_commands(bot):
         tag = await find(interaction, name)
         if tag is None:
             return
-        if tag["owner_id"] != interaction.user.id:
+        if not can_overwrite(interaction, tag):
             await reply(interaction, t("error.not_owner"))
             return
         if content is None:
@@ -549,7 +566,7 @@ def register_commands(bot):
         name = valid_name(name)
         if current is None:
             return
-        if current["owner_id"] != interaction.user.id:
+        if not can_overwrite(interaction, current):
             await reply(interaction, t("error.not_owner"))
             return
         if name is None:
@@ -595,8 +612,9 @@ def register_commands(bot):
             interaction.guild_id, name=name, content=content, owner_id=user and user.id
         )
         if tag is None:
-            await interaction.edit_original_response(
-                content=t("error.no_matching_tags" if content or name or user else "error.no_tags")
+            await render.send_error(
+                interaction,
+                t("error.no_matching_tags" if content or name or user else "error.no_tags"),
             )
             return
         title = t("show.random_title", name=code(tag["name"]))

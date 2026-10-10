@@ -1,5 +1,7 @@
 import json
+import re
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import discord
 import pytest
@@ -50,6 +52,20 @@ async def result_of(script: str):
     return await tagscript.parse(runtime(), script)
 
 
+TRASH_ID = "uglytags:delete:7"
+
+
+def custom_ids(payload) -> list[str]:
+    ids = []
+    for component in payload:
+        if component.get("custom_id"):
+            ids.append(component["custom_id"])
+        ids += custom_ids(component.get("components", []))
+        if "accessory" in component:
+            ids += custom_ids([component["accessory"]])
+    return ids
+
+
 async def test_prepare_plain_message_with_files_and_embeds():
     result = await result_of('hello{attachtext:file body}{embedjson:{"title":"t"}}')
     prepared = render.prepare(runtime(), result)
@@ -57,6 +73,12 @@ async def test_prepare_plain_message_with_files_and_embeds():
     assert prepared.embeds[0].title == "t"
     kwargs = prepared.edit_kwargs()
     assert kwargs["attachments"][0].filename == "content.txt"
+    trash = prepared.view.to_components()[0]["components"][0]
+    assert (trash["custom_id"], trash["style"], trash["emoji"]["name"]) == (
+        TRASH_ID,
+        4,
+        render.TRASH_EMOJI,
+    )
     assert render.prepare(runtime(), await result_of("   ")).content == "Tag returned no content"
 
 
@@ -78,10 +100,23 @@ async def test_prepare_legacy_buttons_and_selects():
     prepared = render.prepare(runtime(), result)
     assert isinstance(prepared.view, render.SessionView)
     payload = prepared.view.to_components()
-    assert [row["type"] for row in payload] == [1, 1]
+    assert [row["type"] for row in payload] == [1, 1, 1]
     assert payload[0]["components"][1]["url"] == "https://example.com"
     assert payload[1]["components"][0]["max_values"] == 1
+    assert payload[2]["components"][0]["custom_id"] == TRASH_ID
     assert prepared.content == "text"
+
+
+async def test_delete_button_fits_or_is_skipped():
+    button = json.dumps({"type": 2, "label": "x", "run": "y"})
+    result = await result_of(f"{{componentjson:{button}}}" * 3)
+    payload = render.prepare(runtime(), result).view.to_components()
+    assert custom_ids(payload)[-1] == TRASH_ID
+    assert len(payload) == 1
+    row = json.dumps({"type": 1, "components": [json.loads(button)] * 5})
+    result = await result_of(f"{{componentjson:{row}}}" * 5)
+    payload = render.prepare(runtime(), result).view.to_components()
+    assert TRASH_ID not in custom_ids(payload)
 
 
 async def test_prepare_components_v2_moves_text_into_display():
@@ -109,6 +144,69 @@ async def test_prepare_components_v2_moves_text_into_display():
     assert (payload[0]["type"], payload[0]["content"]) == (10, "text")
     assert payload[1]["type"] == 17
     assert payload[1]["accent_color"] == 0xFF0000
+    assert payload[-1]["type"] == 1
+    assert payload[-1]["components"][0]["custom_id"] == TRASH_ID
+
+
+async def test_delete_button_only_for_requester_and_survives_restart():
+    item = render.DeleteButton(7)
+    match = re.fullmatch(render.DeleteButton.__discord_ui_compiled_template__, TRASH_ID)
+    restored = await render.DeleteButton.from_custom_id(None, item.item, match)
+    assert restored.user_id == 7
+
+    other = SimpleNamespace(
+        user=SimpleNamespace(id=8),
+        response=SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock()),
+        delete_original_response=AsyncMock(),
+    )
+    await restored.callback(other)
+    assert "Only the person" in other.response.send_message.await_args.args[0]
+    other.delete_original_response.assert_not_awaited()
+
+    admin = SimpleNamespace(
+        user=SimpleNamespace(id=9, guild_permissions=discord.Permissions(administrator=True)),
+        response=SimpleNamespace(defer=AsyncMock()),
+        delete_original_response=AsyncMock(),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+    await restored.callback(admin)
+    admin.delete_original_response.assert_awaited_once()
+
+    owner = SimpleNamespace(
+        user=SimpleNamespace(id=7),
+        response=SimpleNamespace(defer=AsyncMock()),
+        delete_original_response=AsyncMock(),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+    await restored.callback(owner)
+    owner.delete_original_response.assert_awaited_once()
+    assert owner.followup.send.await_args.kwargs["ephemeral"]
+
+
+async def test_delete_falls_back_to_message_delete():
+    owner = SimpleNamespace(
+        user=SimpleNamespace(id=7),
+        response=SimpleNamespace(defer=AsyncMock()),
+        delete_original_response=AsyncMock(
+            side_effect=discord.HTTPException(SimpleNamespace(status=404, reason="x"), "gone")
+        ),
+        message=SimpleNamespace(delete=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+    await render.DeleteButton(7).callback(owner)
+    owner.message.delete.assert_awaited_once()
+
+
+async def test_timeout_and_errors_keep_delete_button():
+    button = json.dumps({"type": 2, "label": "x", "run": "y"})
+    result = await result_of(f"{{componentjson:{button}}}")
+    editor = AsyncMock()
+    prepared = render.prepare(runtime(), result, editor=editor)
+    await prepared.view.session.timeout()
+    view = editor.await_args.kwargs["view"]
+    assert custom_ids(view.to_components()) == [TRASH_ID]
+    await prepared.view.session.fail("broken")
+    assert custom_ids(editor.await_args.kwargs["view"].to_components()) == [TRASH_ID]
 
 
 async def test_pages_attach_referenced_files():
@@ -126,3 +224,13 @@ async def test_pages_attach_referenced_files():
     assert isinstance(prepared.view, render.Paginator)
     assert prepared.content == "one"
     assert prepared.view.first.disabled and not prepared.view.next.disabled
+    payload = prepared.view.to_components()
+    assert payload[1]["components"][0]["custom_id"] == TRASH_ID
+    stranger = SimpleNamespace(
+        user=SimpleNamespace(id=9),
+        data={"custom_id": TRASH_ID},
+        response=SimpleNamespace(send_message=AsyncMock()),
+    )
+    assert await prepared.view.interaction_check(stranger)
+    stranger.data = {"custom_id": "next"}
+    assert not await prepared.view.interaction_check(stranger)

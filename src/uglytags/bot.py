@@ -8,6 +8,7 @@ from discord import app_commands
 from uglytags.db import Database
 from uglytags.i18n import t
 from uglytags.media import BYTES_PER_MB, DEFAULT_MAX_MEDIA_MB, parse_media_limit_mb
+from uglytags.render import DeleteButton
 from uglytags.ui import register_commands, report_error
 
 log = logging.getLogger(__name__)
@@ -45,6 +46,7 @@ class UglyTags(discord.Client):
     async def setup_hook(self):
         self.session = aiohttp.ClientSession()
         await self.db.open()
+        self.add_dynamic_items(DeleteButton)
         if self.test_guild_id:
             guild = discord.Object(id=self.test_guild_id)
             self.tree.copy_global_to(guild=guild)

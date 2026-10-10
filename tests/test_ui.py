@@ -135,6 +135,9 @@ async def test_save_tag_rejects_other_owner_and_missing_files():
 
 def test_name_candidates_fit_limit():
     assert name_candidates("hello", 3) == ["hello1", "hello2", "hello3"]
+    assert name_candidates("newserver1", 2) == ["newserver2", "newserver3"]
+    assert name_candidates("v9", 2) == ["v10", "v11"]
+    assert name_candidates("2024", 1) == ["2025"]
     long = name_candidates("x" * 100, 1)[0]
     assert len(long) == 100 and long.endswith("x1")
 
@@ -188,6 +191,27 @@ async def test_create_on_other_users_tag_offers_new_name_only():
     args = bot.db.create_tag.await_args.args
     assert (args[1], args[2], args[3], args[4]) == (1, "hello1", "body", 2)
     assert "created" in click.edit_original_response.await_args.kwargs["content"]
+    await bot.close()
+
+
+async def test_administrators_can_overwrite_and_edit_others_tags():
+    bot = conflict_bot(tag(owner_id=3))
+    event = interaction(administrator=True)
+    await command(bot, "create")(event, "hello", "admin body")
+    assert "<@3>" in event.response.send_message.await_args.args[0]
+    view = event.response.send_message.await_args.kwargs["view"]
+    assert [item.label for item in view.children] == ["Overwrite", "Create as hello1", "Cancel"]
+    click = button_event()
+    click.user.guild_permissions = discord.Permissions(administrator=True)
+    await view.overwrite.callback(click)
+    assert bot.db.save_content.await_args.args[:2] == (10, "admin body")
+    event = interaction(administrator=True)
+    await command(bot, "edit")(event, "hello", None)
+    assert event.response.send_modal.await_args.args[0].tag["owner_id"] == 3
+    bot.db.rename = AsyncMock()
+    event = interaction(administrator=True)
+    await command(bot, "rename")(event, "hello", "renamed")
+    bot.db.rename.assert_awaited_once_with(10, "renamed")
     await bot.close()
 
 

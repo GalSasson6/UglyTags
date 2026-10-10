@@ -9,7 +9,10 @@ PostgreSQL. Licensed under MIT.
 All commands are slash commands and work in servers only. Tags belong to the server
 they were created in. Tag names are 1-100 characters and are matched
 case-insensitively. Management replies are private; `/t` and `/tag random` post
-publicly.
+publicly. Every public tag message has a red trash can button that deletes it; the
+person who ran the command and server administrators can use it, and it keeps
+working after the bot restarts. If a tag's own components fill every button slot, the
+delete button is left out.
 
 - `/t name [arguments] [attachment]`: runs a tag. `arguments` fills `{args}`;
   `attachment` is used by `{image}`, `{media}`, and similar functions. Discord does
@@ -17,11 +20,15 @@ publicly.
   uses NotSoBot's `t` alias.
 - `/tag create name [content]`: creates a tag. Without `content`, a form opens with
   multi-line content and up to 10 file uploads. If the name is taken, nothing is
-  overwritten: the bot asks whether to overwrite it (only offered if you own that
-  tag) or create the tag under the first free suggested name, such as `name1`.
-- `/tag edit name [content]`: edits one of your tags, the same way.
+  overwritten: the bot asks whether to overwrite it (only offered to the tag's owner
+  and server administrators) or create the tag under the first free suggested name:
+  `name` suggests `name1`, and a name ending in a number counts up, so `name1`
+  suggests `name2`.
+- `/tag edit name [content]`: edits a tag, the same way. Owners can edit their own
+  tags; server administrators can edit any tag.
 - `/tag alias tag name`: creates or repoints an alias that runs another tag.
-- `/tag rename tag name`: renames one of your tags.
+- `/tag rename tag name`: renames a tag. Owners can rename their own tags; server
+  administrators can rename any tag.
 - `/tag info name`: shows raw content, owner, ID, uses, dates, and stored files.
 - `/tag random [arguments] [content] [name] [user] [attachment]`: runs a random
   matching tag.
@@ -35,10 +42,11 @@ publicly.
 
 ### Permissions
 
-These follow NotSoBot:
+These follow NotSoBot, except that server administrators can also overwrite tags:
 
-- Only the owner can edit or rename a tag. Creating a tag under a name owned by
-  someone else fails.
+- Only the owner or a member with Administrator (the server owner always has it) can
+  edit, rename, or overwrite a tag; this keeps the original owner. Other members are
+  offered a different name instead.
 - Members with Manage Server or Ban Members can remove anyone's tag after a
   confirmation.
 - `/tag remove all` without a user, or for another user, requires Administrator.
