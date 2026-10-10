@@ -71,7 +71,7 @@ async def test_commands_and_intents():
     assert {command.name for command in bot.tree.get_commands()} == {
         "t",
         "tag",
-        "\U0001f4ac tag reply",
+        "\U0001f4ac Tag reply",
     }
     shortcut = bot.tree.get_command("\U0001f4ac tag reply", type=discord.AppCommandType.message)
     assert shortcut.guild_only
