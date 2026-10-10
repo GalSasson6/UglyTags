@@ -63,10 +63,14 @@ def command(bot, *path):
 
 async def test_commands_and_intents():
     bot = UglyTags("postgresql://localhost/test")
+    assert {command.name for command in bot.tree.get_commands()} == {"t", "tag"}
+    show = bot.tree.get_command("t")
+    assert show.guild_only
+    assert [parameter.name for parameter in show.parameters] == ["name", "arguments", "attachment"]
+    assert show.parameters[0].required and show.parameters[0].autocomplete
     group = bot.tree.get_command("tag")
     assert group.guild_only
     assert {command.qualified_name for command in group.walk_commands()} >= {
-        "tag show",
         "tag create",
         "tag edit",
         "tag alias",

@@ -6,12 +6,15 @@ PostgreSQL. Licensed under MIT.
 
 ## Commands
 
-All commands are slash commands under `/tag` and work in servers only. Tags belong
-to the server they were created in. Tag names are 1-100 characters and are matched
-case-insensitively. Management replies are private; `show` and `random` post publicly.
+All commands are slash commands and work in servers only. Tags belong to the server
+they were created in. Tag names are 1-100 characters and are matched
+case-insensitively. Management replies are private; `/t` and `/tag random` post
+publicly.
 
-- `/tag show name [arguments] [attachment]`: runs a tag. `arguments` fills `{args}`;
-  `attachment` is used by `{image}`, `{media}`, and similar functions.
+- `/t name [arguments] [attachment]`: runs a tag. `arguments` fills `{args}`;
+  `attachment` is used by `{image}`, `{media}`, and similar functions. Discord does
+  not allow `/tag` to take a tag name because it has subcommands, so showing a tag
+  uses NotSoBot's `t` alias.
 - `/tag create name [content]`: creates a tag. Without `content`, a form opens with
   multi-line content and up to 10 file uploads. Running it on a tag you own edits it.
 - `/tag edit name [content]`: edits one of your tags, the same way.

@@ -66,8 +66,9 @@ For multi-step tasks, state a brief plan:
 
 - Python 3.11+; production uses Python 3.14, discord.py 2.7+, and PostgreSQL 18.
 - Use `uv sync --locked` for installation. Commit `uv.lock` when dependencies change.
-- Scope: NotSoBot's `/tag` commands only. Slash commands only, server tags only; no
-	prefix commands, custom commands, DM tags, tag directory, or NotSoBot API features.
+- Scope: NotSoBot's tag commands only, as `/t` (show) and `/tag`. Slash commands only,
+	server tags only; no prefix commands, custom commands, DM tags, tag directory, or
+	NotSoBot API features.
 - Keep Discord commands and forms in `ui.py`, message rendering, components, and
 	pagination in `render.py`, component JSON validation in `components.py`, TagScript in
 	`tagscript.py`, math in `mathexpr.py`, persistence in `db.py`/`schema.sql`, files in

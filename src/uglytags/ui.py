@@ -377,7 +377,8 @@ def register_commands(bot):
         name = clean_name(name)
         return name if 0 < len(name) <= MAX_NAME else None
 
-    @group.command(name="show", description=t("command.show"))
+    @bot.tree.command(name="t", description=t("command.show"))
+    @app_commands.guild_only()
     @app_commands.describe(
         name=t("option.name"), arguments=t("option.arguments"), attachment=t("option.attachment")
     )
