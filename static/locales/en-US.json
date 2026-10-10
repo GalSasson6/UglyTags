@@ -60,7 +60,7 @@
   "result.alias": "Ok, created an alias tag called {name} for tag {target}",
   "result.renamed": "Successfully renamed tag {old} to {new}",
   "result.removed": "Removed tag {name}",
-  "result.deleted": "Message deleted.",
+  "result.deleted": "✅ Message deleted.",
   "show.empty": "Tag returned no content",
   "show.random_title": "Showing tag: {name}",
   "show.component_error": "TagScript error has occurred: {error}",

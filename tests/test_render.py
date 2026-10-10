@@ -171,6 +171,7 @@ async def test_delete_button_only_for_requester_and_survives_restart():
     )
     await restored.callback(admin)
     admin.delete_original_response.assert_awaited_once()
+    assert admin.followup.send.await_args.args[0] == "✅ Message deleted."
 
     owner = SimpleNamespace(
         user=SimpleNamespace(id=7),

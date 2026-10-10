@@ -73,7 +73,7 @@ async def test_commands_and_intents():
         "tag",
         "\U0001f4ac Tag reply",
     }
-    shortcut = bot.tree.get_command("\U0001f4ac tag reply", type=discord.AppCommandType.message)
+    shortcut = bot.tree.get_command("\U0001f4ac Tag reply", type=discord.AppCommandType.message)
     assert shortcut.guild_only
     assert shortcut.type == discord.AppCommandType.message
     show = bot.tree.get_command("t")
@@ -126,7 +126,7 @@ async def test_tag_reply_opens_private_recent_picker(monkeypatch):
     bot = stats_bot(recent_tags=AsyncMock(return_value=[tag(), tag(id=11, name="second")]))
     monkeypatch.setattr(ui, "can_send_tag", lambda event: True)
     event = interaction()
-    shortcut = bot.tree.get_command("\U0001f4ac tag reply", type=discord.AppCommandType.message)
+    shortcut = bot.tree.get_command("\U0001f4ac Tag reply", type=discord.AppCommandType.message)
     await shortcut.callback(event, reply_target())
     bot.db.recent_tags.assert_awaited_once_with(1, 2)
     modal = event.response.send_modal.await_args.args[0]
