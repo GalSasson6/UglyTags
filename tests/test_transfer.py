@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 from datetime import UTC, datetime
@@ -110,29 +111,59 @@ async def test_attachment_links_become_stored_files(monkeypatch):
     monkeypatch.setattr(transfer, "download", fake_download)
     monkeypatch.setattr(transfer, "refresh_urls", AsyncMock(return_value={}))
     report = transfer.ImportReport()
-    await transfer.store_attachments(entries, None, None, 10, report)
+    await transfer.store_attachments(entries, None, None, 10, report, transfer.ImportLimits())
     assert entries[0]["content"] == "{attach:cat.png} {attach:cat-2.png|x.png}"
     assert entries[0]["files"] == {"cat.png": b"png", "cat-2.png": b"png"}
     assert entries[1]["content"].startswith("{attach:https://")
     assert report.failed_files == 1
 
 
-async def test_import_download_budget(monkeypatch):
-    monkeypatch.setattr(transfer, "MAX_IMPORT_DOWNLOAD_BYTES", 3)
-    calls = []
-
+async def test_import_download_limits(monkeypatch):
     async def fake_download(session, url, max_bytes):
-        calls.append(max_bytes)
+        if max_bytes < 3:
+            raise transfer.MediaError("too large")
         return b"abc"
 
     monkeypatch.setattr(transfer, "download", fake_download)
     monkeypatch.setattr(transfer, "refresh_urls", AsyncMock(return_value={}))
     base = "https://cdn.discordapp.com/attachments/1/2/"
-    entries = [{"content": f"{{attach:{base}a.png}}{{attach:{base}b.png}}", "files": {}}]
+    content = "".join(f"{{attach:{base}{name}.png}}" for name in "abcd")
+
+    entries = [{"content": content, "files": {}}]
     report = transfer.ImportReport()
-    await transfer.store_attachments(entries, None, None, 10, report)
-    assert calls == [3]
+    limits = transfer.ImportLimits(download_bytes=7)
+    await transfer.store_attachments(entries, None, None, 10, report, limits)
+    assert len(entries[0]["files"]) == 2
+    assert report.failed_files == 2
+
+    entries = [{"content": content, "files": {}}]
+    report = transfer.ImportReport()
+    limits = transfer.ImportLimits(downloads=3)
+    await transfer.store_attachments(entries, None, None, 10, report, limits)
+    assert len(entries[0]["files"]) == 3
     assert report.failed_files == 1
+
+
+async def test_downloads_run_concurrently(monkeypatch):
+    running, peak = 0, 0
+
+    async def fake_download(session, url, max_bytes):
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        await asyncio.sleep(0.01)
+        running -= 1
+        return b"x"
+
+    monkeypatch.setattr(transfer, "download", fake_download)
+    monkeypatch.setattr(transfer, "refresh_urls", AsyncMock(return_value={}))
+    base = "https://cdn.discordapp.com/attachments/1/2/"
+    entries = [{"content": f"{{attach:{base}{index}.png}}", "files": {}} for index in range(10)]
+    await transfer.store_attachments(
+        entries, None, None, 10, transfer.ImportReport(), transfer.ImportLimits()
+    )
+    assert peak == transfer.DOWNLOAD_CONCURRENCY
+    assert all(len(entry["files"]) == 1 for entry in entries)
 
 
 def test_parse_entries_rejects_schema_violations():
@@ -177,7 +208,9 @@ async def test_import_remaps_taken_ids(monkeypatch):
         existing_ids=AsyncMock(return_value={111111111111111111}),
         import_tags=AsyncMock(return_value=["a", "b"]),
     )
-    bot = SimpleNamespace(db=db, http=None, session=None, max_media_bytes=10)
+    bot = SimpleNamespace(
+        db=db, http=None, session=None, max_media_bytes=10, import_limits=transfer.ImportLimits()
+    )
     report = await transfer.import_tags(bot, 9, data)
     entries = db.import_tags.await_args.args[1]
     assert entries[0]["id"] != 111111111111111111
@@ -227,7 +260,33 @@ async def test_import_remaps_group_members():
         existing_ids=AsyncMock(return_value={111111111111111111}),
         import_tags=AsyncMock(return_value=["a", "g"]),
     )
-    bot = SimpleNamespace(db=db, http=None, session=None, max_media_bytes=10)
+    bot = SimpleNamespace(
+        db=db, http=None, session=None, max_media_bytes=10, import_limits=transfer.ImportLimits()
+    )
     await transfer.import_tags(bot, 9, data)
     entries = db.import_tags.await_args.args[1]
     assert entries[1]["members"] == [entries[0]["id"]] != [111111111111111111]
+
+
+async def test_import_for_one_owner_skips_other_tags_before_downloading(monkeypatch):
+    download = AsyncMock(return_value=b"png")
+    monkeypatch.setattr(transfer, "download", download)
+    monkeypatch.setattr(transfer, "refresh_urls", AsyncMock(return_value={}))
+    mine, theirs = "222222222222222222", "555555555555555555"
+    data = json.dumps(
+        [
+            {"name": "mine", "content": "x", "user": {"id": mine}},
+            {"name": "theirs", "content": f"{{attach:{URL}}}", "user": {"id": theirs}},
+        ]
+    ).encode()
+    db = SimpleNamespace(
+        existing_ids=AsyncMock(return_value=set()),
+        import_tags=AsyncMock(return_value=["mine"]),
+    )
+    bot = SimpleNamespace(
+        db=db, http=None, session=None, max_media_bytes=10, import_limits=transfer.ImportLimits()
+    )
+    report = await transfer.import_tags(bot, 9, data, int(mine))
+    assert [entry["name"] for entry in db.import_tags.await_args.args[1]] == ["mine"]
+    assert (report.imported, report.not_owned) == (1, 1)
+    download.assert_not_awaited()

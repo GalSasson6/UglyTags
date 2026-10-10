@@ -2096,12 +2096,12 @@ async def tag_function(rt, arg, tag):
     fetched = await rt.db.get_tag_by_id(int(tag_id))
     if not fetched or not rt.guild or fetched["guild_id"] != rt.guild.id:
         raise TagError("Cannot call this tag")
-    await rt.db.use(fetched["id"])
+    await rt.db.use(fetched, rt.guild.id, rt.user.id)
     if is_group(fetched):
         fetched = await rt.db.random_member(target_id(fetched))
         if fetched is None:
             raise TagError("This group has no tags")
-        await rt.db.use(fetched["id"])
+        await rt.db.use(fetched, rt.guild.id, rt.user.id)
     old_tag = rt.tag
     old_variables = dict(tag.variables)
     same = bool(old_tag) and old_tag["id"] == fetched["id"]

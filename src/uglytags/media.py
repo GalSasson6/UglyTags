@@ -27,13 +27,17 @@ class MediaError(Exception):
 
 
 def parse_media_limit_mb(value: str | None) -> int:
+    return parse_positive_int("MAX_MEDIA_MB", value, DEFAULT_MAX_MEDIA_MB)
+
+
+def parse_positive_int(name: str, value: str | None, default: int) -> int:
     try:
-        limit = DEFAULT_MAX_MEDIA_MB if value is None else int(value)
+        number = default if value is None or not value.strip() else int(value)
     except ValueError as error:
-        raise ValueError("MAX_MEDIA_MB must be a whole number") from error
-    if limit <= 0:
-        raise ValueError("MAX_MEDIA_MB must be greater than zero")
-    return limit
+        raise ValueError(f"{name} must be a whole number") from error
+    if number <= 0:
+        raise ValueError(f"{name} must be greater than zero")
+    return number
 
 
 def safe_filename(name: str) -> str:

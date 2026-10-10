@@ -11,7 +11,8 @@ Rotate exposed Discord tokens immediately in the Discord Developer Portal.
 Rotate database credentials separately. Removing a secret from the latest commit
 does not remove it from Git history or invalidate it.
 
-Tags, tag files, stored TagScript variables, and Discord IDs are user data. Restrict
+Tags, tag files, stored TagScript variables, the tag use log (which member ran which
+tag and when, kept for one year), and Discord IDs are user data. Restrict
 database and backup access, define a backup retention policy, and do not expose
 PostgreSQL to the public internet. Uploaded files are stored as-is and are not
 scanned for malware; treat them as untrusted. TagScript never runs Python code, and

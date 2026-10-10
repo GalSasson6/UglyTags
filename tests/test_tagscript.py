@@ -224,7 +224,7 @@ async def test_nested_tag_runs_with_its_own_arguments():
     assert await run("{tag:333333333333333333|x y} {tagname} {args}", "z", rt) == (
         "child:x y:child test z"
     )
-    db.use.assert_awaited_once_with(333333333333333333)
+    db.use.assert_awaited_once_with(child, 1, 7)
     other = make_tag(444444444444444444, "x")
     other["guild_id"] = 2
     db.tags[other["id"]] = other
@@ -247,7 +247,7 @@ async def test_nested_group_runs_a_member():
     db = FakeDB([member, group, empty])
     rt = runtime(db)
     assert await run("{tag:666666666666666666}", rt=rt) == "member:member"
-    assert [call.args[0] for call in db.use.await_args_list] == [group["id"], member["id"]]
+    assert [call.args[0]["id"] for call in db.use.await_args_list] == [group["id"], member["id"]]
     with pytest.raises(TagError, match="no tags"):
         await run("{tag:777777777777777777}", rt=rt)
 

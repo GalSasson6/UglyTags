@@ -1,11 +1,23 @@
 import secrets
 import time
+from datetime import UTC, datetime
 from importlib.resources import files
 
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 DISCORD_EPOCH = 1420070400000
+EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+REGULAR = "t.reference_id IS NULL AND NOT t.is_group"
+SIZE_COLUMNS = """
+    octet_length(t.name) + octet_length(t.content) AS text,
+    (SELECT COALESCE(sum(octet_length(f.data)), 0) FROM tag_files f WHERE f.tag_id = t.id)
+        AS files,
+    (SELECT count(*) FROM tag_files f WHERE f.tag_id = t.id) AS file_count,
+    (SELECT COALESCE(sum(octet_length(v.name) + octet_length(v.value)), 0)
+        FROM tag_variables v WHERE v.tag_id = t.id) AS variables
+"""
+SIZE_TOTAL = "text + files + variables"
 TAG_COLUMNS = """
     t.id, t.guild_id, t.name, t.content, t.owner_id, t.reference_id, t.uses,
     t.created_at, t.edited_at, t.last_used_at, t.is_group,
@@ -178,10 +190,198 @@ class Database:
         )
         return await cursor.fetchone()
 
-    async def use(self, tag_id: int):
-        await self.execute(
-            "UPDATE tags SET uses = uses + 1, last_used_at = now() WHERE id = %s", (tag_id,)
+    async def use(self, tag: dict, guild_id: int, user_id: int):
+        tag_ids = [tag["id"]] + ([tag["reference_id"]] if tag.get("reference_id") else [])
+        async with self.pool.connection() as connection, connection.transaction():
+            await connection.execute(
+                "UPDATE tags SET uses = uses + 1, last_used_at = now() WHERE id = ANY(%s)",
+                (tag_ids,),
+            )
+            async with connection.cursor() as cursor:
+                await cursor.executemany(
+                    "INSERT INTO tag_uses (tag_id, guild_id, user_id) VALUES (%s, %s, %s)",
+                    [(tag_id, guild_id, user_id) for tag_id in tag_ids],
+                )
+
+    async def cleanup_uses(self) -> int:
+        cursor = await self.execute(
+            "DELETE FROM tag_uses WHERE used_at < now() - INTERVAL '1 year'"
         )
+        return cursor.rowcount
+
+    async def fetchall(self, query: str, params: tuple | list = ()):
+        cursor = await self.execute(query, params)
+        return await cursor.fetchall()
+
+    async def fetchone(self, query: str, params: tuple | list = ()):
+        cursor = await self.execute(query, params)
+        return await cursor.fetchone()
+
+    async def server_stats(self, guild_id: int, since: datetime | None) -> dict:
+        summary = await self.fetchone(
+            f"""SELECT count(*) AS tags,
+                    count(*) FILTER (WHERE is_group) AS groups,
+                    count(*) FILTER (WHERE reference_id IS NOT NULL) AS aliases,
+                    COALESCE(sum(uses) FILTER (WHERE {REGULAR}), 0) AS uses,
+                    count(*) FILTER (WHERE uses = 0) AS never_used,
+                    count(*) FILTER (
+                        WHERE COALESCE(last_used_at, created_at) < now() - INTERVAL '30 days'
+                    ) AS stale
+                FROM tags t WHERE guild_id = %s""",
+            (guild_id,),
+        )
+        period = await self.fetchone(
+            f"""SELECT count(*) AS uses FROM tag_uses u JOIN tags t ON t.id = u.tag_id
+                WHERE u.guild_id = %s AND u.used_at >= %s AND {REGULAR}""",
+            (guild_id, since or EPOCH),
+        )
+        if since:
+            top_tags = await self.fetchall(
+                """SELECT t.name, count(*) AS uses FROM tag_uses u JOIN tags t ON t.id = u.tag_id
+                   WHERE u.guild_id = %s AND u.used_at >= %s
+                   GROUP BY t.id, t.name ORDER BY uses DESC, lower(t.name) LIMIT 10""",
+                (guild_id, since),
+            )
+        else:
+            top_tags = await self.fetchall(
+                """SELECT name, uses FROM tags WHERE guild_id = %s AND uses > 0
+                   ORDER BY uses DESC, lower(name) LIMIT 10""",
+                (guild_id,),
+            )
+        top_users = await self.fetchall(
+            f"""SELECT u.user_id, count(*) AS uses FROM tag_uses u JOIN tags t ON t.id = u.tag_id
+                WHERE u.guild_id = %s AND u.used_at >= %s AND {REGULAR}
+                GROUP BY u.user_id ORDER BY uses DESC LIMIT 5""",
+            (guild_id, since or EPOCH),
+        )
+        storage = await self.storage(guild_id)
+        return {
+            **summary,
+            "period_uses": period["uses"],
+            "top_tags": top_tags,
+            "top_users": top_users,
+            "storage": storage["total"],
+        }
+
+    async def tag_stats(self, tag_id: int, since: datetime | None) -> dict:
+        period = await self.fetchone(
+            "SELECT count(*) AS uses FROM tag_uses WHERE tag_id = %s AND used_at >= %s",
+            (tag_id, since or EPOCH),
+        )
+        top_users = await self.fetchall(
+            """SELECT user_id, count(*) AS uses FROM tag_uses
+               WHERE tag_id = %s AND used_at >= %s
+               GROUP BY user_id ORDER BY uses DESC LIMIT 5""",
+            (tag_id, since or EPOCH),
+        )
+        size = await self.fetchone(
+            f"SELECT {SIZE_COLUMNS} FROM tags t WHERE t.id = %s",
+            (tag_id,),
+        )
+        return {"period_uses": period["uses"], "top_users": top_users, "size": size}
+
+    async def user_stats(self, guild_id: int, user_id: int, since: datetime | None) -> dict:
+        owned = await self.fetchone(
+            f"""SELECT count(*) AS tags, COALESCE(sum(uses) FILTER (WHERE {REGULAR}), 0) AS uses
+                FROM tags t WHERE guild_id = %s AND owner_id = %s""",
+            (guild_id, user_id),
+        )
+        period = await self.fetchone(
+            f"""SELECT count(*) FILTER (WHERE t.owner_id = %s) AS owned_uses,
+                    count(*) FILTER (WHERE u.user_id = %s) AS runs
+                FROM tag_uses u JOIN tags t ON t.id = u.tag_id
+                WHERE u.guild_id = %s AND u.used_at >= %s AND {REGULAR}""",
+            (user_id, user_id, guild_id, since or EPOCH),
+        )
+        top_tags = await self.fetchall(
+            f"""SELECT t.name, count(*) AS uses FROM tag_uses u JOIN tags t ON t.id = u.tag_id
+                WHERE u.guild_id = %s AND u.user_id = %s AND u.used_at >= %s AND {REGULAR}
+                GROUP BY t.id, t.name ORDER BY uses DESC, lower(t.name) LIMIT 10""",
+            (guild_id, user_id, since or EPOCH),
+        )
+        storage = await self.fetchone(
+            f"""SELECT COALESCE(sum({SIZE_TOTAL}), 0) AS total
+                FROM (SELECT {SIZE_COLUMNS} FROM tags t
+                      WHERE t.guild_id = %s AND t.owner_id = %s) sizes""",
+            (guild_id, user_id),
+        )
+        return {
+            "tags": owned["tags"],
+            "uses": owned["uses"],
+            "period_owned_uses": period["owned_uses"],
+            "runs": period["runs"],
+            "top_tags": top_tags,
+            "storage": storage["total"],
+        }
+
+    async def ranking(self, guild_id: int, sort: str, since: datetime | None) -> list[dict]:
+        count = "COALESCE(p.uses, 0)" if since else "t.uses"
+        order = {
+            "most": f"{count} DESC, lower(t.name)",
+            "least": f"{count} ASC, COALESCE(t.last_used_at, t.created_at) ASC, lower(t.name)",
+            "recent": "t.last_used_at DESC NULLS LAST, lower(t.name)",
+            "unused": "COALESCE(t.last_used_at, t.created_at) ASC, lower(t.name)",
+            "newest": "t.created_at DESC, lower(t.name)",
+            "oldest": "t.created_at ASC, lower(t.name)",
+        }[sort]
+        return await self.fetchall(
+            f"""SELECT t.name, {count} AS uses, t.last_used_at, t.created_at
+                FROM tags t LEFT JOIN (
+                    SELECT tag_id, count(*) AS uses FROM tag_uses
+                    WHERE guild_id = %s AND used_at >= %s GROUP BY tag_id
+                ) p ON p.tag_id = t.id
+                WHERE t.guild_id = %s ORDER BY {order}""",
+            (guild_id, since or EPOCH, guild_id),
+        )
+
+    async def prune_candidates(
+        self,
+        guild_id: int,
+        *,
+        unused_days: int | None,
+        least_used: int | None,
+        max_uses: int | None,
+        min_age_days: int,
+    ) -> list[dict]:
+        clauses = ["t.guild_id = %s", "t.created_at <= now() - make_interval(days => %s)"]
+        params: list = [guild_id, min_age_days]
+        if unused_days is not None:
+            clauses.append(
+                "(t.last_used_at IS NULL OR t.last_used_at < now() - make_interval(days => %s))"
+            )
+            params.append(unused_days)
+        if max_uses is not None:
+            clauses.append("t.uses < %s")
+            params.append(max_uses)
+        query = f"""SELECT {TAG_COLUMNS} FROM {TAG_FROM} WHERE {" AND ".join(clauses)}
+                    ORDER BY t.uses, COALESCE(t.last_used_at, t.created_at), lower(t.name)"""
+        if least_used is not None:
+            query += " LIMIT %s"
+            params.append(least_used)
+        return await self.fetchall(query, params)
+
+    async def storage(self, guild_id: int) -> dict:
+        totals = await self.fetchone(
+            f"""SELECT COALESCE(sum(files), 0) AS files, COALESCE(sum(text), 0) AS text,
+                    COALESCE(sum(variables), 0) AS variables,
+                    COALESCE(sum({SIZE_TOTAL}), 0) AS total,
+                    COALESCE(sum(file_count), 0) AS file_count
+                FROM (SELECT {SIZE_COLUMNS} FROM tags t WHERE t.guild_id = %s) sizes""",
+            (guild_id,),
+        )
+        top_tags = await self.fetchall(
+            f"""SELECT name, {SIZE_TOTAL} AS size
+                FROM (SELECT t.name, {SIZE_COLUMNS} FROM tags t WHERE t.guild_id = %s) sizes
+                ORDER BY size DESC, lower(name) LIMIT 10""",
+            (guild_id,),
+        )
+        top_owners = await self.fetchall(
+            f"""SELECT owner_id, sum({SIZE_TOTAL}) AS size
+                FROM (SELECT t.owner_id, {SIZE_COLUMNS} FROM tags t WHERE t.guild_id = %s) sizes
+                GROUP BY owner_id ORDER BY size DESC LIMIT 5""",
+            (guild_id,),
+        )
+        return {**totals, "top_tags": top_tags, "top_owners": top_owners}
 
     async def autocomplete(
         self, guild_id: int, query: str, owner_id: int | None = None, groups: bool = False

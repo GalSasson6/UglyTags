@@ -57,3 +57,15 @@ CREATE TABLE IF NOT EXISTS tag_group_members (
 );
 
 CREATE INDEX IF NOT EXISTS tag_group_members_tag ON tag_group_members (tag_id);
+
+-- Migration 3: per-use log for statistics, kept for one year.
+CREATE TABLE IF NOT EXISTS tag_uses (
+    tag_id BIGINT NOT NULL REFERENCES tags ON DELETE CASCADE,
+    guild_id BIGINT NOT NULL,
+    user_id BIGINT NOT NULL,
+    used_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS tag_uses_guild_time ON tag_uses (guild_id, used_at);
+CREATE INDEX IF NOT EXISTS tag_uses_tag_time ON tag_uses (tag_id, used_at);
+CREATE INDEX IF NOT EXISTS tag_uses_used_at ON tag_uses (used_at);

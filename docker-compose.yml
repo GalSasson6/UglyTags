@@ -12,6 +12,9 @@ services:
       DISCORD_TOKEN: ${DISCORD_TOKEN:?Set DISCORD_TOKEN in .env}
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
       MAX_MEDIA_MB: ${MAX_MEDIA_MB:-20}
+      MAX_IMPORT_MB: ${MAX_IMPORT_MB:-50}
+      MAX_IMPORT_DOWNLOADS: ${MAX_IMPORT_DOWNLOADS:-500}
+      MAX_IMPORT_DOWNLOAD_MB: ${MAX_IMPORT_DOWNLOAD_MB:-200}
     depends_on:
       uglytags-db:
         condition: service_healthy

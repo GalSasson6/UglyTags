@@ -1,12 +1,14 @@
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import discord
+import pytest
 
-from uglytags.bot import UglyTags
-from uglytags.ui import TagModal, name_candidates, save_tag, send_export
+from uglytags.bot import UglyTags, parse_import_limits
+from uglytags.transfer import ImportLimits
+from uglytags.ui import TagModal, format_size, name_candidates, save_tag, send_export
 
 
 def tag(**overrides):
@@ -285,11 +287,23 @@ async def test_remove_permissions_follow_notsobot():
     await bot.close()
 
 
-async def test_import_requires_manage_server():
+async def test_import_limits_members_to_their_own_tags(monkeypatch):
     bot = UglyTags("postgresql://localhost/test")
+    calls = []
+
+    async def fake_import(bot, guild_id, data, owner_id):
+        calls.append(owner_id)
+        return SimpleNamespace(imported=1, skipped=0, invalid=0, failed_files=0, not_owned=2)
+
+    monkeypatch.setattr("uglytags.ui.import_tags", fake_import)
+    upload = SimpleNamespace(size=10, read=AsyncMock(return_value=b"[]"))
     event = interaction()
-    await command(bot, "import")(event, SimpleNamespace(size=10))
-    assert "permission" in event.response.send_message.await_args.args[0]
+    await command(bot, "import")(event, upload)
+    assert calls == [2]
+    assert "Skipped 2 tags owned by other users" in event.followup.send.await_args.args[0]
+    event = interaction(manage_guild=True)
+    await command(bot, "import")(event, upload)
+    assert calls == [2, None]
     await bot.close()
 
 
@@ -387,7 +401,10 @@ async def test_showing_group_runs_random_member():
     event.edit_original_response = AsyncMock()
     await command_t(bot)(event, "cats", None, None)
     bot.db.random_member.assert_awaited_once_with(30)
-    assert [call.args[0] for call in bot.db.use.await_args_list] == [30, 20]
+    assert [call.args for call in bot.db.use.await_args_list] == [
+        (cats, 1, 2),
+        (bot.db.random_member.return_value, 1, 2),
+    ]
     assert event.edit_original_response.await_args.kwargs["content"] == "meow"
 
     bot.db.random_member.return_value = None
@@ -417,3 +434,134 @@ async def test_export_includes_group_members():
     exported = json.loads(event.followup.send.await_args.kwargs["file"].fp.read())["tags"]
     assert [item["name"] for item in exported] == ["cats", "cat1"]
     assert exported[0]["uglytags_group_members"] == ["20"]
+
+
+def test_import_limits_from_environment():
+    assert parse_import_limits({}) == ImportLimits()
+    limits = parse_import_limits(
+        {"MAX_IMPORT_MB": "100", "MAX_IMPORT_DOWNLOADS": "3000", "MAX_IMPORT_DOWNLOAD_MB": "2000"}
+    )
+    assert limits == ImportLimits(100_000_000, 3000, 2_000_000_000)
+    assert parse_import_limits({"MAX_IMPORT_MB": ""}) == ImportLimits()
+    for name, value in (("MAX_IMPORT_DOWNLOADS", "0"), ("MAX_IMPORT_MB", "1.5")):
+        with pytest.raises(ValueError, match=name):
+            parse_import_limits({name: value})
+
+
+async def test_import_rejects_files_over_configured_size():
+    bot = UglyTags("postgresql://localhost/test", import_limits=ImportLimits(file_bytes=5_000_000))
+    event = interaction(manage_guild=True)
+    await command(bot, "import")(event, SimpleNamespace(size=5_000_001))
+    assert "at most 5 MB" in event.response.send_message.await_args.args[0]
+    await bot.close()
+
+
+def test_format_size():
+    assert format_size(0) == "0 B"
+    assert format_size(999) == "999 B"
+    assert format_size(1_500) == "1.50 KB"
+    assert format_size(20_000_000) == "20.00 MB"
+    assert format_size(3_250_000_000) == "3.25 GB"
+
+
+def stats_bot(**methods):
+    bot = UglyTags("postgresql://localhost/test")
+    bot.db = SimpleNamespace(close=AsyncMock(), **methods)
+    return bot
+
+
+def stats_event(**permissions):
+    event = interaction(**permissions)
+    event.guild = SimpleNamespace(name="Server")
+    return event
+
+
+async def test_prune_requires_manage_server_and_criteria():
+    bot = stats_bot(prune_candidates=AsyncMock(return_value=[]))
+    event = stats_event()
+    await command(bot, "prune")(event, 30, None, None, 7)
+    assert "permission" in event.response.send_message.await_args.args[0]
+    event = stats_event(manage_guild=True)
+    await command(bot, "prune")(event, None, None, None, 7)
+    assert "at least one" in event.response.send_message.await_args.args[0]
+    bot.db.prune_candidates.assert_not_awaited()
+    event = stats_event(manage_guild=True)
+    await command(bot, "prune")(event, 30, 5, None, 7)
+    assert bot.db.prune_candidates.await_args.kwargs == {
+        "unused_days": 30,
+        "least_used": 5,
+        "max_uses": None,
+        "min_age_days": 7,
+    }
+    assert "No tags match" in event.followup.send.await_args.args[0]
+    await bot.close()
+
+
+async def test_prune_preview_offers_remove_all_controls():
+    rows = [tag(id=index, name=f"t{index}") for index in range(40)]
+    bot = stats_bot(prune_candidates=AsyncMock(return_value=rows))
+    event = stats_event(manage_guild=True)
+    await command(bot, "prune")(event, 30, None, None, 7)
+    content = event.followup.send.await_args.args[0]
+    assert content.startswith("Found 40 tags to delete. (Tags not used in 30 days")
+    assert "`t0`" in content and "and 10 more" in content
+    view = event.followup.send.await_args.kwargs["view"]
+    assert [item.label for item in view.children] == ["Continue", "Cancel", "Export"]
+    assert len(view.tags) == 40
+    await bot.close()
+
+
+async def test_stats_commands_render():
+    now = datetime.now(UTC)
+    bot = stats_bot(
+        server_stats=AsyncMock(
+            return_value={
+                "tags": 3,
+                "groups": 1,
+                "aliases": 0,
+                "uses": 12,
+                "period_uses": 4,
+                "never_used": 1,
+                "stale": 2,
+                "storage": 2_500_000,
+                "top_tags": [{"name": "hello", "uses": 9}],
+                "top_users": [{"user_id": 5, "uses": 4}],
+            }
+        ),
+        ranking=AsyncMock(
+            return_value=[{"name": "hello", "uses": 9, "last_used_at": None, "created_at": now}]
+        ),
+        storage=AsyncMock(
+            return_value={
+                "total": 3000,
+                "files": 2000,
+                "file_count": 1,
+                "text": 1000,
+                "variables": 0,
+                "top_tags": [{"name": "big", "size": 3000}],
+                "top_owners": [{"owner_id": 9, "size": 3000}],
+            }
+        ),
+    )
+    event = stats_event()
+    await command(bot, "stats", "server")(event, 30)
+    embed = event.followup.send.await_args.kwargs["embed"]
+    assert embed.description == "Last 30 days"
+    assert "**Storage**: 2.50 MB" in embed.fields[0].value
+    assert "`hello`: 9 uses" in embed.fields[1].value
+    assert "<@5>: 4 uses" in embed.fields[2].value
+    assert bot.db.server_stats.await_args.args[1] > now - timedelta(days=31)
+
+    event = stats_event()
+    await command(bot, "stats", "list")(event, "least", 0)
+    embed = event.followup.send.await_args.kwargs["embed"]
+    assert embed.title == "Least used tags in Server"
+    assert embed.description.startswith("1. `hello`: 9 uses, last used never")
+    assert bot.db.ranking.await_args.args[1:] == ("least", None)
+
+    event = stats_event()
+    await command(bot, "stats", "storage")(event)
+    embed = event.followup.send.await_args.kwargs["embed"]
+    assert "**Total**: 3.00 KB" in embed.description
+    assert "<@9>: 3.00 KB" in embed.fields[1].value
+    await bot.close()

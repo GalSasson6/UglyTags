@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import binascii
 import json
@@ -12,6 +13,7 @@ import discord
 from uglytags.db import new_id
 from uglytags.media import (
     ATTACH_REFERENCE,
+    BYTES_PER_MB,
     MAX_FILES,
     MediaError,
     download,
@@ -26,11 +28,16 @@ log = logging.getLogger(__name__)
 
 MAX_CONTENT = 4000
 MAX_NAME = 100
-MAX_IMPORT_BYTES = 50_000_000
-MAX_IMPORT_DOWNLOAD_BYTES = 200_000_000
-MAX_IMPORT_DOWNLOADS = 500
+DOWNLOAD_CONCURRENCY = 4
 FILES_KEY = "uglytags_files"
 GROUP_KEY = "uglytags_group_members"
+
+
+@dataclass(frozen=True)
+class ImportLimits:
+    file_bytes: int = 50 * BYTES_PER_MB
+    downloads: int = 500
+    download_bytes: int = 200 * BYTES_PER_MB
 
 
 class TransferError(Exception):
@@ -43,6 +50,7 @@ class ImportReport:
     skipped: int = 0
     invalid: int = 0
     failed_files: int = 0
+    not_owned: int = 0
 
 
 def clean_name(value: str) -> str:
@@ -206,40 +214,56 @@ def _attachment_url(match) -> str:
     return match[2].strip().removeprefix("<").removesuffix(">")
 
 
+def _discord_urls(content: str) -> list[str]:
+    urls = map(_attachment_url, ATTACH_REFERENCE.finditer(content))
+    return list(dict.fromkeys(url for url in urls if is_discord_url(url)))
+
+
 async def store_attachments(
-    entries: list[dict], http, session, max_bytes: int, report: ImportReport
+    entries: list[dict],
+    http,
+    session,
+    max_bytes: int,
+    report: ImportReport,
+    limits: ImportLimits,
 ):
-    cache, budget = {}, MAX_IMPORT_DOWNLOAD_BYTES
+    wanted = []
     for entry in entries:
-        urls = list(
-            dict.fromkeys(
-                url
-                for url in map(_attachment_url, ATTACH_REFERENCE.finditer(entry["content"]))
-                if is_discord_url(url)
-            )
-        )
-        wanted = [url for url in urls if url not in cache][: MAX_FILES - len(entry["files"])]
+        for url in _discord_urls(entry["content"])[: MAX_FILES - len(entry["files"])]:
+            if url not in wanted:
+                wanted.append(url)
+    wanted = wanted[: limits.downloads]
+    refreshed = {}
+    for index in range(0, len(wanted), 50):
         try:
-            refreshed = await refresh_urls(http, wanted)
+            refreshed.update(await refresh_urls(http, wanted[index : index + 50]))
         except discord.HTTPException as error:
             log.warning("Attachment URL refresh failed: %s", error)
-            refreshed = {}
-        for url in wanted:
-            if budget <= 0 or len(cache) >= MAX_IMPORT_DOWNLOADS:
-                break
+    cache, budget = {}, limits.download_bytes
+    semaphore = asyncio.Semaphore(DOWNLOAD_CONCURRENCY)
+
+    async def fetch(url: str):
+        nonlocal budget
+        async with semaphore:
+            if budget <= 0:
+                return
             try:
                 data = await download(session, refreshed.get(url, url), min(max_bytes, budget))
             except (MediaError, aiohttp.ClientError, TimeoutError) as error:
                 log.info("Import attachment download failed: %s", error)
-                data = None
-            cache[url] = data
-            budget -= len(data or b"")
+                return
+            if len(data) <= budget:
+                budget -= len(data)
+                cache[url] = data
+
+    await asyncio.gather(*(fetch(url) for url in wanted))
+    for entry in entries:
 
         def replace(match, entry=entry):
             url = _attachment_url(match)
             if not is_discord_url(url):
                 return match[0]
-            if not cache.get(url) or len(entry["files"]) >= MAX_FILES:
+            if url not in cache or len(entry["files"]) >= MAX_FILES:
                 report.failed_files += 1
                 return match[0]
             filename = unique_filename(filename_from_url(url), entry["files"])
@@ -257,12 +281,18 @@ def acceptable(entry: dict, max_bytes: int) -> bool:
     )
 
 
-async def import_tags(bot, guild_id: int, data: bytes) -> ImportReport:
+async def import_tags(bot, guild_id: int, data: bytes, owner_id: int | None = None) -> ImportReport:
     report = ImportReport()
     entries = parse_entries(data, report)
+    if owner_id is not None:
+        owned = [entry for entry in entries if entry["owner_id"] == owner_id]
+        report.not_owned = len(entries) - len(owned)
+        entries = owned
     candidates = [entry for entry in entries if acceptable(entry, bot.max_media_bytes)]
     report.invalid += len(entries) - len(candidates)
-    await store_attachments(candidates, bot.http, bot.session, bot.max_media_bytes, report)
+    await store_attachments(
+        candidates, bot.http, bot.session, bot.max_media_bytes, report, bot.import_limits
+    )
     valid = [entry for entry in candidates if acceptable(entry, bot.max_media_bytes)]
     report.invalid += len(candidates) - len(valid)
     taken = await bot.db.existing_ids([entry["id"] for entry in valid])

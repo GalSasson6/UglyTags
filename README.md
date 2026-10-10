@@ -38,7 +38,8 @@ delete button is left out.
 - `/tag remove all [content] [name] [user]`: removes matching tags after confirmation,
   with an option to export them first.
 - `/tag export [content] [name] [user]`: exports matching tags as JSON.
-- `/tag import file`: imports a NotSoBot or UglyTags export.
+- `/tag import file`: imports a NotSoBot or UglyTags export. To move your tags to
+  another server, run `/tag export` in the old server and `/tag import` in the new one.
 - `/tag group create name tag`, `/tag group add group tag`, and
   `/tag group remove group tag`: manage tag groups. A group is a tag whose name runs a
   random tag from the group, so `/t cats` posts one of the group's tags. Groups share
@@ -47,6 +48,34 @@ delete button is left out.
   administrators can add or remove any of the server's tags, up to 100 per group.
   Groups cannot contain other groups or have content of their own, and a deleted tag
   leaves every group it was in.
+- `/tag stats server [period]`: an overview with tag and use totals, uses in the
+  period, never-used tags, tags unused for 30+ days, storage, the 10 most used tags,
+  and the 5 members who ran the most tags.
+- `/tag stats tag name [period]`: one tag's uses (all time and in the period), last
+  use, creation, owner, storage, and top members.
+- `/tag stats user [user] [period]`: a member's tag count, uses of their tags, tags
+  they ran, storage, and the tags they ran most.
+- `/tag stats list sort [period]`: a paged ranking of every tag by most used, least
+  used, recently used, longest unused, newest, or oldest.
+- `/tag stats storage`: the server's storage use (files, tag text, and stored
+  variables), the largest tags, and the members using the most storage. Sizes use
+  1 MB = 1,000,000 bytes.
+- `/tag prune [unused_days] [least_used] [max_uses] [min_age_days]`: removes unused
+  tags after a preview with Continue, Cancel, and Export buttons. `unused_days`
+  matches tags not used in that many days (never-used tags count), `max_uses` matches
+  tags with fewer total uses, and `least_used` keeps only that many of the least-used
+  matches. Give at least one; combined criteria must all match. Tags created in the
+  last `min_age_days` (default 7) are never pruned. Aliases and groups can be pruned
+  like any tag, and pruning a tag also removes its aliases.
+
+Stats are visible to everyone as private replies; the period is the last 7 days, 30
+days, year, or all time (the default). Running an alias also counts as a use of its
+target, and running a group also counts for the tag it picked, so tags used only
+through aliases or groups are not treated as unused. Totals count each run once. The
+bot logs each use (tag, member, and time) for period and per-member statistics and
+deletes log entries after one year; all-time totals and last-used times are kept on
+the tag. Usage from before this log existed, including imported NotSoBot counts,
+appears only in all-time totals.
 
 ### Permissions
 
@@ -61,9 +90,12 @@ These follow NotSoBot, except that server administrators can also overwrite tags
   Other members can only remove their own tags.
 - `/tag export` without a user, or for another user, requires Manage Server. Other
   members can only export their own tags.
-- `/tag import` requires Manage Server.
+- `/tag import` imports every tag in the file for members with Manage Server. Other
+  members can import too, but only tags they own in the file; the rest are skipped
+  and counted.
+- `/tag prune` requires Manage Server. `/tag stats` is open to everyone.
 
-Removing a tag also removes its aliases, stored files, and stored variables.
+Removing a tag also removes its aliases, stored files, stored variables, and use log.
 
 ## Tag Files
 
@@ -159,11 +191,18 @@ field, and groups list their tag IDs in an extra `uglytags_group_members` field.
 Exporting an alias or group also exports the tags it points to. An export larger than
 the server's upload limit is refused; use filters to split it.
 
-Import accepts NotSoBot or UglyTags exports up to 50 MB. It keeps names, owners,
-uses, dates, aliases, groups, and tag IDs (new IDs are assigned on collision).
-`{attach:...}` links to Discord attachments are downloaded into PostgreSQL, refreshing
-expired links through Discord, up to 500 links and 200 MB per import. Links that
-cannot be downloaded remain as links.
+Import accepts NotSoBot or UglyTags exports up to `MAX_IMPORT_MB` (default 50 MB). It
+keeps names, owners, uses, dates, aliases, groups, and tag IDs (new IDs are assigned
+on collision). `{attach:...}` links to Discord attachments are downloaded into
+PostgreSQL four at a time, refreshing expired links through Discord, up to
+`MAX_IMPORT_DOWNLOADS` links (default 500) and `MAX_IMPORT_DOWNLOAD_MB` of data
+(default 200 MB) per import. Links over those limits or that cannot be downloaded
+remain as links. Downloaded files are held in memory until the import is saved, so
+size `MAX_IMPORT_DOWNLOAD_MB` to the host's free memory. For a large one-time
+migration, raise these in `.env`, restart the bot, import, and then lower them again.
+The uploaded file is also subject to your own Discord upload limit. If an import
+takes longer than Discord's 15-minute reply window, it still completes and its result
+is written to the bot log.
 Existing names, aliases whose target was not imported, tags over 4,000 characters,
 and malformed entries are skipped and counted.
 

@@ -1,6 +1,7 @@
 import io
 import logging
 import re
+from datetime import UTC, datetime, timedelta
 
 import discord
 import psycopg
@@ -10,6 +11,7 @@ from uglytags import render, tagscript
 from uglytags.db import MAX_GROUP_MEMBERS, GroupFullError, is_group, new_id, target_id
 from uglytags.i18n import t
 from uglytags.media import (
+    BYTES_PER_MB,
     MAX_FILES,
     MediaError,
     attach_references,
@@ -19,7 +21,6 @@ from uglytags.media import (
 )
 from uglytags.transfer import (
     MAX_CONTENT,
-    MAX_IMPORT_BYTES,
     MAX_NAME,
     TransferError,
     clean_name,
@@ -32,6 +33,9 @@ log = logging.getLogger(__name__)
 CONFIRM_TIMEOUT = 300
 REMOVE_ALL_TIMEOUT = 120
 LIST_PAGE_SIZE = 25
+PERIODS = (0, 7, 30, 365)
+SORTS = ("most", "least", "recent", "unused", "newest", "oldest")
+PRUNE_PREVIEW = 30
 
 
 async def report_error(interaction: discord.Interaction, error: Exception):
@@ -163,7 +167,7 @@ async def execute(
 ):
     if not interaction.response.is_done():
         await interaction.response.defer(thinking=True)
-    await bot.db.use(tag["id"])
+    await bot.db.use(tag, interaction.guild_id, interaction.user.id)
     if is_group(tag):
         tag = await bot.db.random_member(target_id(tag))
         if tag is None:
@@ -171,7 +175,7 @@ async def execute(
                 interaction, "\n\n".join(part for part in (title, t("error.group_empty")) if part)
             )
             return
-        await bot.db.use(tag["id"])
+        await bot.db.use(tag, interaction.guild_id, interaction.user.id)
     rt = tagscript.Runtime(
         client=bot,
         guild=interaction.guild,
@@ -375,11 +379,11 @@ class RemoveAll(OwnedView):
 
 
 class ListView(OwnedView):
-    def __init__(self, owner_id: int, title: str, names: list[str]):
+    def __init__(self, owner_id: int, title: str, lines: list[str], footer: str = ""):
         super().__init__(owner_id, CONFIRM_TIMEOUT)
-        self.title, self.index = title, 0
+        self.title, self.footer, self.index = title, footer, 0
         self.pages = [
-            names[index : index + LIST_PAGE_SIZE] for index in range(0, len(names), LIST_PAGE_SIZE)
+            lines[index : index + LIST_PAGE_SIZE] for index in range(0, len(lines), LIST_PAGE_SIZE)
         ]
         self.update()
 
@@ -389,9 +393,10 @@ class ListView(OwnedView):
 
     def embed(self) -> discord.Embed:
         start = self.index * LIST_PAGE_SIZE
-        lines = [f"{start + number}. {code(name)}" for number, name in enumerate(self.page(), 1)]
+        lines = [f"{start + number}. {line}" for number, line in enumerate(self.page(), 1)]
         embed = discord.Embed(title=self.title[:256], description="\n".join(lines)[:4096])
-        embed.set_footer(text=t("list.footer", page=self.index + 1, pages=len(self.pages)))
+        footer = t("list.footer", page=self.index + 1, pages=len(self.pages))
+        embed.set_footer(text=" | ".join(part for part in (footer, self.footer) if part))
         return embed
 
     def page(self) -> list[str]:
@@ -412,6 +417,39 @@ class ListView(OwnedView):
 
 def scope_text(user) -> str:
     return t("scope.user", user=user.mention) if user else t("scope.server")
+
+
+def format_size(size: int) -> str:
+    for unit, scale in (("GB", 10**9), ("MB", 10**6), ("KB", 10**3)):
+        if size >= scale:
+            return f"{size / scale:,.2f} {unit}"
+    return f"{size:,} B"
+
+
+def since(days: int) -> datetime | None:
+    return datetime.now(UTC) - timedelta(days=days) if days else None
+
+
+def period_label(days: int) -> str:
+    return t(f"period.{days}")
+
+
+def last_used(value) -> str:
+    return f"<t:{int(value.timestamp())}:R>" if value else t("stats.never")
+
+
+def ranked(rows: list[dict], line) -> str:
+    return "\n".join(f"{index}. {line(row)}" for index, row in enumerate(rows, 1)) or t(
+        "stats.none"
+    )
+
+
+def stats_embed(title: str, days: int) -> discord.Embed:
+    embed = discord.Embed(
+        title=title[:256], description=period_label(days), colour=discord.Colour.blurple()
+    )
+    embed.set_footer(text=t("stats.footer"))
+    return embed
 
 
 async def send_export(bot, interaction: discord.Interaction, tags: list, options: dict):
@@ -757,7 +795,7 @@ def register_commands(bot):
         if not tags:
             await reply(interaction, t("error.no_matching_tags" if filtered else "error.no_tags"))
             return
-        view = ListView(interaction.user.id, title, [tag["name"] for tag in tags])
+        view = ListView(interaction.user.id, title, [code(tag["name"]) for tag in tags])
         await interaction.followup.send(
             embed=view.embed(),
             view=view if len(view.pages) > 1 else discord.utils.MISSING,
@@ -914,27 +952,265 @@ def register_commands(bot):
     @group.command(name="import", description=t("command.import"))
     @app_commands.describe(file=t("option.import_file"))
     async def import_command(interaction: discord.Interaction, file: discord.Attachment):
-        if not permissions(interaction).manage_guild:
-            await reply(interaction, t("error.permissions"))
-            return
-        if file.size > MAX_IMPORT_BYTES:
-            await reply(interaction, t("error.import_size"))
+        if file.size > bot.import_limits.file_bytes:
+            await reply(
+                interaction,
+                t("error.import_size", limit=bot.import_limits.file_bytes // BYTES_PER_MB),
+            )
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
+        owner_id = None if permissions(interaction).manage_guild else interaction.user.id
         try:
-            report = await import_tags(bot, interaction.guild_id, await file.read())
+            report = await import_tags(bot, interaction.guild_id, await file.read(), owner_id)
         except TransferError as error:
             await reply(interaction, t(str(error)))
             return
-        await reply(
-            interaction,
-            t(
-                "import.done",
-                imported=f"{report.imported:,}",
-                skipped=f"{report.skipped:,}",
-                invalid=f"{report.invalid:,}",
-                failed=f"{report.failed_files:,}",
+        message = t(
+            "import.done",
+            imported=f"{report.imported:,}",
+            skipped=f"{report.skipped:,}",
+            invalid=f"{report.invalid:,}",
+            failed=f"{report.failed_files:,}",
+        )
+        if report.not_owned:
+            message += " " + t("import.not_owned", count=f"{report.not_owned:,}")
+        log.info("Import into guild %s finished: %s", interaction.guild_id, report)
+        try:
+            await reply(interaction, message)
+        except discord.HTTPException:
+            log.warning("Could not report the import result; the interaction expired")
+
+    stats_group = app_commands.Group(name="stats", description=t("command.stats"), parent=group)
+    periods = [app_commands.Choice(name=period_label(days), value=days) for days in PERIODS]
+
+    @stats_group.command(name="server", description=t("command.stats_server"))
+    @app_commands.describe(period=t("option.period"))
+    @app_commands.choices(period=periods)
+    async def stats_server(interaction: discord.Interaction, period: int = 0):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        stats = await bot.db.server_stats(interaction.guild_id, since(period))
+        embed = stats_embed(t("stats.server_title", guild=interaction.guild.name), period)
+        embed.add_field(
+            name=t("stats.overview"),
+            value=t(
+                "stats.server_overview",
+                tags=f"{stats['tags']:,}",
+                groups=f"{stats['groups']:,}",
+                aliases=f"{stats['aliases']:,}",
+                uses=f"{stats['uses']:,}",
+                period_uses=f"{stats['period_uses']:,}",
+                never=f"{stats['never_used']:,}",
+                stale=f"{stats['stale']:,}",
+                storage=format_size(stats["storage"]),
             ),
+            inline=False,
+        )
+        embed.add_field(
+            name=t("stats.most_used"),
+            value=ranked(
+                stats["top_tags"],
+                lambda row: t("stats.tag_line", name=code(row["name"]), uses=f"{row['uses']:,}"),
+            )[:1024],
+        )
+        embed.add_field(
+            name=t("stats.top_users"),
+            value=ranked(
+                stats["top_users"],
+                lambda row: t(
+                    "stats.user_line", user=f"<@{row['user_id']}>", uses=f"{row['uses']:,}"
+                ),
+            )[:1024],
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @stats_group.command(name="tag", description=t("command.stats_tag"))
+    @app_commands.describe(name=t("option.name"), period=t("option.period"))
+    @app_commands.autocomplete(name=all_tags)
+    @app_commands.choices(period=periods)
+    async def stats_tag(interaction: discord.Interaction, name: str, period: int = 0):
+        tag = await find(interaction, name)
+        if tag is None:
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        stats = await bot.db.tag_stats(tag["id"], since(period))
+        size = stats["size"]
+        embed = stats_embed(tag["name"], period)
+        embed.add_field(
+            name=t("stats.overview"),
+            value=t(
+                "stats.tag_overview",
+                uses=f"{tag['uses']:,}",
+                period_uses=f"{stats['period_uses']:,}",
+                last_used=last_used(tag["last_used_at"]),
+                created=f"<t:{int(tag['created_at'].timestamp())}:R>",
+                owner=f"<@{tag['owner_id']}>",
+                storage=format_size(size["text"] + size["files"] + size["variables"]),
+                files=f"{size['file_count']:,}",
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name=t("stats.top_users"),
+            value=ranked(
+                stats["top_users"],
+                lambda row: t(
+                    "stats.user_line", user=f"<@{row['user_id']}>", uses=f"{row['uses']:,}"
+                ),
+            )[:1024],
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @stats_group.command(name="user", description=t("command.stats_user"))
+    @app_commands.describe(user=t("option.stats_user"), period=t("option.period"))
+    @app_commands.choices(period=periods)
+    async def stats_user(
+        interaction: discord.Interaction, user: discord.User | None = None, period: int = 0
+    ):
+        user = user or interaction.user
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        stats = await bot.db.user_stats(interaction.guild_id, user.id, since(period))
+        embed = stats_embed(t("stats.user_title", user=user.display_name), period)
+        embed.add_field(
+            name=t("stats.overview"),
+            value=t(
+                "stats.user_overview",
+                tags=f"{stats['tags']:,}",
+                uses=f"{stats['uses']:,}",
+                period_uses=f"{stats['period_owned_uses']:,}",
+                runs=f"{stats['runs']:,}",
+                storage=format_size(stats["storage"]),
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name=t("stats.most_run"),
+            value=ranked(
+                stats["top_tags"],
+                lambda row: t("stats.tag_line", name=code(row["name"]), uses=f"{row['uses']:,}"),
+            )[:1024],
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @stats_group.command(name="list", description=t("command.stats_list"))
+    @app_commands.describe(sort=t("option.sort"), period=t("option.period"))
+    @app_commands.choices(
+        sort=[app_commands.Choice(name=t(f"sort.{key}"), value=key) for key in SORTS],
+        period=periods,
+    )
+    async def stats_list(interaction: discord.Interaction, sort: str, period: int = 0):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        rows = await bot.db.ranking(interaction.guild_id, sort, since(period))
+        if not rows:
+            await reply(interaction, t("error.no_tags"))
+            return
+        lines = [
+            t(
+                "stats.list_line",
+                name=code(row["name"]),
+                uses=f"{row['uses']:,}",
+                last_used=last_used(row["last_used_at"]),
+                created=f"<t:{int(row['created_at'].timestamp())}:d>",
+            )
+            for row in rows
+        ]
+        title = t("stats.list_title", sort=t(f"sort.{sort}"), guild=interaction.guild.name)
+        view = ListView(interaction.user.id, title, lines, period_label(period))
+        await interaction.followup.send(
+            embed=view.embed(),
+            view=view if len(view.pages) > 1 else discord.utils.MISSING,
+            ephemeral=True,
+        )
+
+    @stats_group.command(name="storage", description=t("command.stats_storage"))
+    async def stats_storage(interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        storage = await bot.db.storage(interaction.guild_id)
+        embed = discord.Embed(
+            title=t("stats.storage_title", guild=interaction.guild.name)[:256],
+            description=t(
+                "stats.storage_overview",
+                total=format_size(storage["total"]),
+                files=format_size(storage["files"]),
+                file_count=f"{storage['file_count']:,}",
+                text=format_size(storage["text"]),
+                variables=format_size(storage["variables"]),
+            ),
+            colour=discord.Colour.blurple(),
+        )
+        embed.add_field(
+            name=t("stats.largest_tags"),
+            value=ranked(
+                [row for row in storage["top_tags"] if row["size"]],
+                lambda row: t(
+                    "stats.size_line", name=code(row["name"]), size=format_size(row["size"])
+                ),
+            )[:1024],
+        )
+        embed.add_field(
+            name=t("stats.largest_owners"),
+            value=ranked(
+                storage["top_owners"],
+                lambda row: t(
+                    "stats.size_line", name=f"<@{row['owner_id']}>", size=format_size(row["size"])
+                ),
+            )[:1024],
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @group.command(name="prune", description=t("command.prune"))
+    @app_commands.describe(
+        unused_days=t("option.unused_days"),
+        least_used=t("option.least_used"),
+        max_uses=t("option.max_uses"),
+        min_age_days=t("option.min_age_days"),
+    )
+    async def prune(
+        interaction: discord.Interaction,
+        unused_days: app_commands.Range[int, 1, 36500] | None = None,
+        least_used: app_commands.Range[int, 1, 100000] | None = None,
+        max_uses: app_commands.Range[int, 1, 1000000000] | None = None,
+        min_age_days: app_commands.Range[int, 0, 36500] = 7,
+    ):
+        if not permissions(interaction).manage_guild:
+            await reply(interaction, t("error.permissions"))
+            return
+        if unused_days is None and least_used is None and max_uses is None:
+            await reply(interaction, t("error.prune_criteria"))
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        tags = await bot.db.prune_candidates(
+            interaction.guild_id,
+            unused_days=unused_days,
+            least_used=least_used,
+            max_uses=max_uses,
+            min_age_days=min_age_days,
+        )
+        parts = []
+        if unused_days is not None:
+            parts.append(t("prune.unused_days", days=unused_days))
+        if max_uses is not None:
+            parts.append(t("prune.max_uses", uses=max_uses))
+        if least_used is not None:
+            parts.append(t("prune.least_used", count=least_used))
+        if min_age_days:
+            parts.append(t("prune.min_age", days=min_age_days))
+        scope = t("prune.scope", criteria=", ".join(parts))
+        if not tags:
+            await reply(interaction, t("prune.none", scope=scope))
+            return
+        names = ", ".join(code(tag["name"]) for tag in tags[:PRUNE_PREVIEW])
+        if len(tags) > PRUNE_PREVIEW:
+            names += t("prune.more", count=f"{len(tags) - PRUNE_PREVIEW:,}")
+        options = {
+            "unusedDays": unused_days,
+            "leastUsed": least_used,
+            "maxUses": max_uses,
+            "minAgeDays": min_age_days,
+        }
+        view = RemoveAll(bot, interaction.user.id, interaction.guild_id, tags, options, scope)
+        content = t("remove_all.found", count=f"{len(tags):,}", scope=scope) + "\n" + names
+        view.message = await interaction.followup.send(
+            content[:2000], view=view, ephemeral=True, wait=True
         )
 
     bot.tree.add_command(group)

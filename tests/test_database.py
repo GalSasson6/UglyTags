@@ -1,7 +1,7 @@
 import asyncio
 import os
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from importlib.resources import files
 
 import psycopg
@@ -52,7 +52,7 @@ async def test_tag_lifecycle_and_case_insensitive_names(db):
     assert await db.file(tag_id, "b.png") == b"b"
     assert (await db.get_tag(1, "hello"))["edited_at"] is not None
     await db.rename(tag_id, "Renamed")
-    await db.use(tag_id)
+    await db.use(await db.get_tag_by_id(tag_id), 1, 5)
     renamed = await db.get_tag_by_id(tag_id)
     assert (renamed["name"], renamed["uses"]) == ("Renamed", 1)
     assert renamed["last_used_at"] is not None
@@ -222,3 +222,84 @@ async def test_migrates_version_one_schema():
     finally:
         await connection.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
         await connection.close()
+
+
+async def test_use_log_stats_and_ranking(db):
+    plain, alias, group, other = new_id(), new_id(), new_id(), new_id()
+    await db.create_tag(plain, 1, "hello", "hi", 7, {"a.png": b"12345"})
+    await db.create_tag(other, 1, "quiet", "x" * 10, 8)
+    await db.save_alias(alias, 1, "hey", 7, plain)
+    await db.create_group(group, 1, "greetings", 7, plain)
+    await db.use(await db.get_tag_by_id(plain), 1, 100)
+    await db.use(await db.get_tag_by_id(alias), 1, 100)
+    await db.use(await db.get_tag_by_id(group), 1, 200)
+    await db.use(await db.get_tag_by_id(plain), 1, 200)
+    hello = await db.get_tag(1, "hello")
+    assert hello["uses"] == 3 and hello["last_used_at"] is not None
+    await db.execute("UPDATE tag_uses SET used_at = now() - INTERVAL '40 days' WHERE user_id = 100")
+
+    stats = await db.server_stats(1, None)
+    assert (stats["tags"], stats["groups"], stats["aliases"]) == (4, 1, 1)
+    assert stats["uses"] == 3
+    assert stats["never_used"] == 1
+    assert stats["storage"] > 5
+    assert [row["user_id"] for row in stats["top_users"]] == [100, 200]
+    recent = await db.server_stats(1, datetime.now(UTC) - timedelta(days=30))
+    assert recent["period_uses"] == 1
+    assert [row["user_id"] for row in recent["top_users"]] == [200]
+
+    tag_stats = await db.tag_stats(plain, datetime.now(UTC) - timedelta(days=30))
+    assert tag_stats["period_uses"] == 1
+    assert tag_stats["size"]["files"] == 5 and tag_stats["size"]["file_count"] == 1
+    user = await db.user_stats(1, 200, None)
+    assert (user["tags"], user["runs"], user["top_tags"][0]["name"]) == (0, 1, "hello")
+    owner = await db.user_stats(1, 7, None)
+    assert owner["tags"] == 3 and owner["uses"] == 3 and owner["storage"] > 5
+
+    assert [row["name"] for row in await db.ranking(1, "most", None)][0] == "hello"
+    assert [row["name"] for row in await db.ranking(1, "least", None)][0] == "quiet"
+    assert (await db.ranking(1, "recent", None))[-1]["last_used_at"] is None
+
+    await db.execute("UPDATE tag_uses SET used_at = now() - INTERVAL '2 years' WHERE user_id = 100")
+    assert await db.cleanup_uses() == 3
+    assert (await db.tag_stats(plain, None))["period_uses"] == 1
+
+
+async def test_prune_candidates_and_storage(db):
+    ids = {}
+    for name, uses, last_days, age_days in (
+        ("fresh", 0, None, 1),
+        ("never", 0, None, 30),
+        ("stale", 5, 100, 200),
+        ("busy", 50, 1, 200),
+        ("rare", 1, 10, 200),
+    ):
+        ids[name] = new_id()
+        await db.create_tag(ids[name], 1, name, "x", 7)
+        await db.execute(
+            """UPDATE tags SET uses = %s, created_at = now() - make_interval(days => %s),
+                   last_used_at = CASE WHEN %s::int IS NULL THEN NULL
+                       ELSE now() - make_interval(days => %s) END
+               WHERE id = %s""",
+            (uses, age_days, last_days, last_days or 0, ids[name]),
+        )
+
+    async def names(**options):
+        options = {"unused_days": None, "least_used": None, "max_uses": None, **options}
+        options.setdefault("min_age_days", 7)
+        return [tag["name"] for tag in await db.prune_candidates(1, **options)]
+
+    assert await names(unused_days=30) == ["never", "stale"]
+    assert await names(unused_days=30, min_age_days=0) == ["never", "fresh", "stale"]
+    assert await names(max_uses=2) == ["never", "rare"]
+    assert await names(least_used=2) == ["never", "rare"]
+    assert await names(unused_days=5, max_uses=10) == ["never", "rare", "stale"]
+    assert await names(unused_days=5, least_used=1) == ["never"]
+
+    await db.create_tag(new_id(), 2, "elsewhere", "x" * 1000, 9, {"big.bin": b"0" * 2000})
+    storage = await db.storage(2)
+    assert storage["files"] == 2000 and storage["file_count"] == 1
+    assert storage["total"] == storage["files"] + storage["text"] + storage["variables"]
+    assert storage["top_tags"][0]["name"] == "elsewhere"
+    assert storage["top_owners"][0]["owner_id"] == 9
+    assert (await db.storage(1))["files"] == 0
