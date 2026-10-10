@@ -340,6 +340,42 @@ def test_reply_mention_matches_copycat_app_reply_format(content, expected):
     assert prepared.edit_kwargs()["content"] == expected
 
 
+async def test_file_reply_uses_v2_to_place_ping_below_tag_content():
+    target = SimpleNamespace(
+        content="original",
+        jump_url="https://discord.com/channels/1/2/3",
+        author=SimpleNamespace(
+            mention="<@4>",
+            global_name="author",
+            name="author",
+            display_avatar=SimpleNamespace(url="https://cdn.discordapp.com/avatars/4/avatar.png"),
+        ),
+        attachments=[],
+        embeds=[],
+    )
+    result = await result_of("caption")
+    result.files = [
+        tagscript.TagFile(b"image", "cat.png", "a cat"),
+        tagscript.TagFile(b"text", "notes.txt"),
+    ]
+    prepared = render.prepare(runtime(), result, reply_message=target)
+
+    assert isinstance(prepared.view, discord.ui.LayoutView)
+    assert prepared.content is None
+    assert prepared.embeds == []
+    assert [file.filename for file in prepared.edit_kwargs()["attachments"]] == [
+        "cat.png",
+        "notes.txt",
+    ]
+    payload = prepared.view.to_components()
+    assert [item["type"] for item in payload] == [10, 12, 13, 10, 17, 1]
+    assert payload[0]["content"] == "caption"
+    assert payload[1]["items"][0]["media"]["url"] == "attachment://cat.png"
+    assert payload[2]["file"]["url"] == "attachment://notes.txt"
+    assert payload[3]["content"] == "-# <@4>"
+    assert payload[-1]["components"][0]["custom_id"] == TRASH_ID
+
+
 async def test_reply_card_handles_attachment_only_and_truncated_messages():
     target = SimpleNamespace(
         content="",

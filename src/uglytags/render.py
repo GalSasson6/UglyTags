@@ -1,6 +1,7 @@
 import io
 import json
 import logging
+import mimetypes
 import re
 from dataclasses import dataclass, field
 
@@ -550,6 +551,27 @@ def prepare(
         content = f"{title}\n\n{content}"[:4000].strip()
     prepared = Prepared(files=result.files[:10])
     has_components = bool(result.components and result.components["components"])
+    if reply_message and prepared.files and not (has_components or result.embeds):
+        prepared.view = discord.ui.LayoutView(timeout=None)
+        if content:
+            prepared.view.add_item(discord.ui.TextDisplay(content))
+        for file in prepared.files:
+            media_type = mimetypes.guess_type(file.filename)[0] or ""
+            attachment = f"attachment://{file.filename}"
+            if media_type.startswith(("image/", "video/")):
+                prepared.view.add_item(
+                    discord.ui.MediaGallery(
+                        discord.MediaGalleryItem(
+                            attachment,
+                            description=file.description,
+                            spoiler=file.spoiler,
+                        )
+                    )
+                )
+            else:
+                prepared.view.add_item(discord.ui.File(attachment, spoiler=file.spoiler))
+        prepared.view.add_item(discord.ui.ActionRow(DeleteButton(rt.user.id)))
+        return add_reply(prepared, reply_message)
     if has_components:
         session = ComponentSession(rt, result, editor, reply_message)
         prepared.view = session.build(content)
