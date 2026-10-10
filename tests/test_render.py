@@ -355,7 +355,7 @@ async def test_file_reply_uses_v2_to_place_ping_below_tag_content():
     )
     result = await result_of("caption")
     result.files = [
-        tagscript.TagFile(b"image", "cat.png", "a cat"),
+        tagscript.TagFile(b"image", "cat.png", "a cat", spoiler=True),
         tagscript.TagFile(b"text", "notes.txt"),
     ]
     prepared = render.prepare(runtime(), result, reply_message=target)
@@ -364,13 +364,14 @@ async def test_file_reply_uses_v2_to_place_ping_below_tag_content():
     assert prepared.content is None
     assert prepared.embeds == []
     assert [file.filename for file in prepared.edit_kwargs()["attachments"]] == [
-        "cat.png",
+        "SPOILER_cat.png",
         "notes.txt",
     ]
     payload = prepared.view.to_components()
     assert [item["type"] for item in payload] == [10, 12, 13, 10, 17, 1]
     assert payload[0]["content"] == "caption"
-    assert payload[1]["items"][0]["media"]["url"] == "attachment://cat.png"
+    assert payload[1]["items"][0]["media"]["url"] == "attachment://SPOILER_cat.png"
+    assert payload[1]["items"][0]["spoiler"]
     assert payload[2]["file"]["url"] == "attachment://notes.txt"
     assert payload[3]["content"] == "-# <@4>"
     assert payload[-1]["components"][0]["custom_id"] == TRASH_ID
