@@ -361,6 +361,7 @@ async def test_file_reply_uses_v2_to_place_ping_below_tag_content():
     prepared = render.prepare(runtime(), result, reply_message=target)
 
     assert isinstance(prepared.view, discord.ui.LayoutView)
+    assert prepared.followup
     assert prepared.content is None
     assert prepared.embeds == []
     assert [file.filename for file in prepared.edit_kwargs()["attachments"]] == [
@@ -375,6 +376,39 @@ async def test_file_reply_uses_v2_to_place_ping_below_tag_content():
     assert payload[2]["file"]["url"] == "attachment://notes.txt"
     assert payload[3]["content"] == "-# <@4>"
     assert payload[-1]["components"][0]["custom_id"] == TRASH_ID
+
+
+async def test_file_reply_is_sent_fresh_for_attachment_backed_gallery():
+    target = SimpleNamespace(
+        content="original",
+        jump_url="https://discord.com/channels/1/2/3",
+        author=SimpleNamespace(
+            id=4,
+            mention="<@4>",
+            bot=False,
+            global_name="author",
+            name="author",
+            display_avatar=SimpleNamespace(url="https://cdn.discordapp.com/avatars/4/avatar.png"),
+        ),
+        attachments=[],
+        embeds=[],
+    )
+    result = await result_of("")
+    result.files = [tagscript.TagFile(b"image", "image.png")]
+    event = SimpleNamespace(
+        edit_original_response=AsyncMock(),
+        delete_original_response=AsyncMock(),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+
+    await render.send_result(event, runtime(), result, reply_message=target)
+
+    event.edit_original_response.assert_not_awaited()
+    sent = event.followup.send.await_args.kwargs
+    assert sent["wait"]
+    assert sent["files"][0].filename == "image.png"
+    assert isinstance(sent["view"], discord.ui.LayoutView)
+    event.delete_original_response.assert_awaited_once()
 
 
 async def test_reply_card_handles_attachment_only_and_truncated_messages():

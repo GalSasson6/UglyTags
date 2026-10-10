@@ -30,6 +30,7 @@ class Prepared:
     embeds: list = field(default_factory=list)
     files: list = field(default_factory=list)
     view: discord.ui.View | discord.ui.LayoutView | None = None
+    followup: bool = False
 
     def edit_kwargs(self) -> dict:
         return {
@@ -574,6 +575,7 @@ def prepare(
             else:
                 prepared.view.add_item(discord.ui.File(attachment, spoiler=file.spoiler))
         prepared.view.add_item(discord.ui.ActionRow(DeleteButton(rt.user.id)))
+        prepared.followup = True
         return add_reply(prepared, reply_message)
     if has_components:
         session = ComponentSession(rt, result, editor, reply_message)
@@ -617,7 +619,15 @@ async def send_result(
                 users=[reply_message.author] if not reply_message.author.bot else False,
                 replied_user=False,
             )
-        await interaction.edit_original_response(**kwargs)
+        if prepared.followup:
+            files = kwargs.pop("attachments")
+            await interaction.followup.send(**kwargs, files=files, wait=True)
+            try:
+                await interaction.delete_original_response()
+            except discord.HTTPException:
+                log.debug("Could not remove deferred tag response")
+        else:
+            await interaction.edit_original_response(**kwargs)
     except discord.HTTPException as error:
         log.warning("Tag response failed: %s", error)
         if prepared.view:
