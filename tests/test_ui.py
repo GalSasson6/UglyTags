@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 import discord
 
 from uglytags.bot import UglyTags
-from uglytags.ui import TagModal, save_tag, send_export
+from uglytags.ui import TagModal, name_candidates, save_tag, send_export
 
 
 def tag(**overrides):
@@ -126,13 +126,95 @@ async def test_save_tag_rejects_other_owner_and_missing_files():
     )
     bot = SimpleNamespace(db=db)
     event = interaction()
-    await save_tag(bot, event, "hello", "x", [], tag(owner_id=3))
-    assert "already exists" in event.response.send_message.await_args.args[0]
+    assert "already exists" in await save_tag(bot, event, "hello", "x", [], tag(owner_id=3))
     db.get_tag.return_value = None
-    event = interaction()
-    await save_tag(bot, event, "new", "{attach:ghost.png}", [], None)
-    assert "ghost.png" in event.response.send_message.await_args.args[0]
+    message = await save_tag(bot, event, "new", "{attach:ghost.png}", [], None)
+    assert "ghost.png" in message
     db.create_tag.assert_not_awaited()
+
+
+def test_name_candidates_fit_limit():
+    assert name_candidates("hello", 3) == ["hello1", "hello2", "hello3"]
+    long = name_candidates("x" * 100, 1)[0]
+    assert len(long) == 100 and long.endswith("x1")
+
+
+def conflict_bot(existing, taken=()):
+    bot = UglyTags("postgresql://localhost/test")
+    bot.db = SimpleNamespace(
+        get_tag=AsyncMock(return_value=existing),
+        taken_names=AsyncMock(return_value=set(taken)),
+        file_names=AsyncMock(return_value=[]),
+        save_content=AsyncMock(),
+        create_tag=AsyncMock(),
+        close=AsyncMock(),
+    )
+    return bot
+
+
+def button_event(user_id=2):
+    event = interaction(user_id)
+    event.edit_original_response = AsyncMock()
+    return event
+
+
+async def test_create_on_own_tag_asks_before_overwriting():
+    bot = conflict_bot(tag(), taken={"hello1"})
+    event = interaction()
+    await command(bot, "create")(event, "Hello", "new body")
+    bot.db.save_content.assert_not_awaited()
+    bot.db.create_tag.assert_not_awaited()
+    assert "`Hello2`" in event.response.send_message.await_args.args[0]
+    view = event.response.send_message.await_args.kwargs["view"]
+    assert [item.label for item in view.children] == ["Overwrite", "Create as Hello2", "Cancel"]
+
+    bot.db.get_tag.return_value = tag()
+    click = button_event()
+    await view.overwrite.callback(click)
+    assert bot.db.save_content.await_args.args[:2] == (10, "new body")
+    assert "edited" in click.edit_original_response.await_args.kwargs["content"]
+    await bot.close()
+
+
+async def test_create_on_other_users_tag_offers_new_name_only():
+    bot = conflict_bot(tag(owner_id=3))
+    event = interaction()
+    await command(bot, "create")(event, "hello", "body")
+    view = event.response.send_message.await_args.kwargs["view"]
+    assert [item.label for item in view.children] == ["Create as hello1", "Cancel"]
+    bot.db.get_tag.return_value = None
+    click = button_event()
+    await view.create_as.callback(click)
+    args = bot.db.create_tag.await_args.args
+    assert (args[1], args[2], args[3], args[4]) == (1, "hello1", "body", 2)
+    assert "created" in click.edit_original_response.await_args.kwargs["content"]
+    await bot.close()
+
+
+async def test_create_conflict_without_content_opens_form():
+    bot = conflict_bot(tag())
+    event = interaction()
+    await command(bot, "create")(event, "hello", None)
+    event.response.send_modal.assert_not_awaited()
+    view = event.response.send_message.await_args.kwargs["view"]
+    click = button_event()
+    await view.create_as.callback(click)
+    modal = click.response.send_modal.await_args.args[0]
+    assert (modal.name, modal.tag) == ("hello1", None)
+    click = button_event()
+    await view.overwrite.callback(click)
+    modal = click.response.send_modal.await_args.args[0]
+    assert (modal.name, modal.tag["id"]) == ("hello", 10)
+    await bot.close()
+
+
+async def test_create_without_conflict_saves_directly():
+    bot = conflict_bot(None)
+    event = interaction()
+    await command(bot, "create")(event, "fresh", "body")
+    assert bot.db.create_tag.await_args.args[2] == "fresh"
+    assert "created" in event.followup.send.await_args.args[0]
+    await bot.close()
 
 
 async def test_edit_and_rename_require_owner():

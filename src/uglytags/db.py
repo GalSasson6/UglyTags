@@ -237,6 +237,13 @@ class Database:
         cursor = await self.execute("SELECT id FROM tags WHERE id = ANY(%s)", (tag_ids,))
         return {row["id"] for row in await cursor.fetchall()}
 
+    async def taken_names(self, guild_id: int, names: list[str]) -> set[str]:
+        cursor = await self.execute(
+            "SELECT lower(name) AS name FROM tags WHERE guild_id = %s AND lower(name) = ANY(%s)",
+            (guild_id, [name.lower() for name in names]),
+        )
+        return {row["name"] for row in await cursor.fetchall()}
+
     async def import_tags(self, guild_id: int, tags: list[dict]) -> list[str]:
         imported, imported_ids = [], set()
         async with self.pool.connection() as connection, connection.transaction():

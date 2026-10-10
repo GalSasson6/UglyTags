@@ -100,9 +100,10 @@ class TagModal(discord.ui.Modal):
         except MediaError as error:
             await reply(interaction, t(str(error), max_media_mb=self.bot.max_media_mb))
             return
-        await save_tag(
+        message = await save_tag(
             self.bot, interaction, self.name, self.content.value.strip(), uploads, self.tag
         )
+        await reply(interaction, message)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception):
         await report_error(interaction, error)
@@ -115,15 +116,13 @@ async def save_tag(
     content: str,
     uploads: list[tuple[str, bytes]],
     expected: dict | None,
-):
+) -> str:
     guild_id, user_id = interaction.guild_id, interaction.user.id
     current = await bot.db.get_tag(guild_id, name)
     if current and current["owner_id"] != user_id:
-        await reply(interaction, t("error.tag_exists"))
-        return
+        return t("error.tag_exists")
     if (current and current["id"]) != (expected and expected["id"]):
-        await reply(interaction, t("error.tag_changed"))
-        return
+        return t("error.tag_changed")
     existing = await bot.db.file_names(current["id"]) if current else []
     kept = referenced_files(content) & set(existing)
     taken, new_files = set(kept), {}
@@ -134,27 +133,22 @@ async def save_tag(
     if new_files:
         content = "\n".join(part for part in (content, attach_references(list(new_files))) if part)
     if not content:
-        await reply(interaction, t("error.empty_content"))
-        return
+        return t("error.empty_content")
     if len(content) > MAX_CONTENT:
-        await reply(interaction, t("error.content_length", limit=MAX_CONTENT))
-        return
+        return t("error.content_length", limit=MAX_CONTENT)
     if len(taken) > MAX_FILES:
-        await reply(interaction, t("error.file_count", limit=MAX_FILES))
-        return
+        return t("error.file_count", limit=MAX_FILES)
     missing = referenced_files(content) - taken
     if missing:
-        await reply(interaction, t("error.missing_files", files=", ".join(sorted(missing))))
-        return
+        return t("error.missing_files", files=", ".join(sorted(missing)))
     try:
         if current:
             await bot.db.save_content(current["id"], content, new_files, kept)
         else:
             await bot.db.create_tag(new_id(), guild_id, name, content, user_id, new_files)
     except psycopg.errors.UniqueViolation:
-        await reply(interaction, t("error.tag_exists"))
-        return
-    await reply(interaction, t("result.edited" if current else "result.created", name=code(name)))
+        return t("error.tag_exists")
+    return t("result.edited" if current else "result.created", name=code(name))
 
 
 async def execute(
@@ -215,6 +209,71 @@ class OwnedView(discord.ui.View):
 
     async def on_error(self, interaction, error, item):
         await report_error(interaction, error)
+
+
+def name_candidates(name: str, count: int = 100) -> list[str]:
+    candidates = []
+    for number in range(1, count + 1):
+        suffix = str(number)
+        candidates.append(name[: MAX_NAME - len(suffix)] + suffix)
+    return candidates
+
+
+async def available_name(bot, guild_id: int, name: str) -> str:
+    candidates = name_candidates(name)
+    taken = await bot.db.taken_names(guild_id, candidates)
+    for candidate in candidates:
+        if candidate.lower() not in taken:
+            return candidate
+    suffix = str(new_id())
+    return name[: MAX_NAME - len(suffix)] + suffix
+
+
+class CreateConflict(OwnedView):
+    def __init__(
+        self, bot, owner_id: int, existing: dict | None, suggestion: str, content: str | None
+    ):
+        super().__init__(owner_id, CONFIRM_TIMEOUT)
+        self.bot, self.existing, self.suggestion, self.content = (
+            bot,
+            existing,
+            suggestion,
+            content,
+        )
+        self.create_as.label = t("action.create_as", name=suggestion)[:80]
+        if existing is None:
+            self.remove_item(self.overwrite)
+
+    async def save(self, interaction: discord.Interaction, name: str, expected: dict | None):
+        if self.content is None:
+            await interaction.response.send_modal(
+                TagModal(self.bot, interaction.guild_id, self.owner_id, name, expected)
+            )
+            return
+        self.stop()
+        await interaction.response.defer()
+        message = await save_tag(self.bot, interaction, name, self.content, [], expected)
+        await interaction.edit_original_response(content=message, view=None)
+
+    @discord.ui.button(label=t("action.overwrite"), style=discord.ButtonStyle.danger)
+    async def overwrite(self, interaction, button):
+        await self.save(interaction, self.existing["name"], self.existing)
+
+    @discord.ui.button(label="create", style=discord.ButtonStyle.primary)
+    async def create_as(self, interaction, button):
+        await self.save(interaction, self.suggestion, None)
+
+    @discord.ui.button(label=t("action.cancel"), style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction, button):
+        self.stop()
+        await interaction.response.edit_message(content=t("create.cancelled"), view=None)
+
+    async def on_timeout(self):
+        if self.message:
+            try:
+                await self.message.edit(content=t("create.expired"), view=None)
+            except discord.HTTPException:
+                pass
 
 
 class ForceRemove(OwnedView):
@@ -401,16 +460,31 @@ def register_commands(bot):
             await reply(interaction, t("error.name", limit=MAX_NAME))
             return
         tag = await bot.db.get_tag(interaction.guild_id, name)
-        if tag and tag["owner_id"] != interaction.user.id:
-            await reply(interaction, t("error.tag_exists"))
+        if tag:
+            suggestion = await available_name(bot, interaction.guild_id, name)
+            owned = tag["owner_id"] == interaction.user.id
+            view = CreateConflict(
+                bot,
+                interaction.user.id,
+                tag if owned else None,
+                suggestion,
+                None if content is None else content.strip(),
+            )
+            key = "create.conflict_own" if owned else "create.conflict_other"
+            await interaction.response.send_message(
+                t(key, name=code(tag["name"]), suggestion=code(suggestion)),
+                view=view,
+                ephemeral=True,
+            )
+            view.message = await interaction.original_response()
             return
         if content is None:
             await interaction.response.send_modal(
-                TagModal(bot, interaction.guild_id, interaction.user.id, name, tag)
+                TagModal(bot, interaction.guild_id, interaction.user.id, name)
             )
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
-        await save_tag(bot, interaction, name, content.strip(), [], tag)
+        await reply(interaction, await save_tag(bot, interaction, name, content.strip(), [], None))
 
     @group.command(name="edit", description=t("command.edit"))
     @app_commands.describe(name=t("option.name"), content=t("option.content"))
@@ -428,7 +502,8 @@ def register_commands(bot):
             )
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
-        await save_tag(bot, interaction, tag["name"], content.strip(), [], tag)
+        message = await save_tag(bot, interaction, tag["name"], content.strip(), [], tag)
+        await reply(interaction, message)
 
     @group.command(name="alias", description=t("command.alias"))
     @app_commands.describe(tag=t("option.alias_target"), name=t("option.new_name"))

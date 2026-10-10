@@ -16,7 +16,9 @@ publicly.
   not allow `/tag` to take a tag name because it has subcommands, so showing a tag
   uses NotSoBot's `t` alias.
 - `/tag create name [content]`: creates a tag. Without `content`, a form opens with
-  multi-line content and up to 10 file uploads. Running it on a tag you own edits it.
+  multi-line content and up to 10 file uploads. If the name is taken, nothing is
+  overwritten: the bot asks whether to overwrite it (only offered if you own that
+  tag) or create the tag under the first free suggested name, such as `name1`.
 - `/tag edit name [content]`: edits one of your tags, the same way.
 - `/tag alias tag name`: creates or repoints an alias that runs another tag.
 - `/tag rename tag name`: renames one of your tags.

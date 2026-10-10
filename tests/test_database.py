@@ -140,3 +140,4 @@ async def test_import_skips_conflicts_and_orphan_aliases(db):
     assert await db.file(first, "a.txt") == b"a"
     assert (await db.get_tag(1, "alias"))["reference_content"] == "{attach:a.txt}"
     assert await db.existing_ids([first, orphan]) == {first}
+    assert await db.taken_names(1, ["FIRST", "Alias-2", "taken"]) == {"first", "taken"}
