@@ -340,6 +340,32 @@ def test_reply_mention_matches_copycat_app_reply_format(content, expected):
     assert prepared.edit_kwargs()["content"] == expected
 
 
+async def test_reply_explicitly_embeds_image_attachment():
+    target = SimpleNamespace(
+        content="original",
+        jump_url="https://discord.com/channels/1/2/3",
+        author=SimpleNamespace(
+            mention="<@4>",
+            global_name="author",
+            name="author",
+            display_avatar=SimpleNamespace(url="https://cdn.discordapp.com/avatars/4/avatar.png"),
+        ),
+        attachments=[],
+        embeds=[],
+    )
+    result = await result_of("")
+    result.files = [
+        tagscript.TagFile(b"image", "image.png"),
+        tagscript.TagFile(b"text", "notes.txt"),
+    ]
+    prepared = render.prepare(runtime(), result, reply_message=target)
+
+    kwargs = prepared.edit_kwargs()
+    assert kwargs["attachments"][0].filename == "image.png"
+    assert kwargs["embeds"][0].image.url == "attachment://image.png"
+    assert kwargs["embeds"][-1].description.startswith("**[Reply to:]")
+
+
 async def test_reply_card_handles_attachment_only_and_truncated_messages():
     target = SimpleNamespace(
         content="",

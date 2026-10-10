@@ -532,6 +532,29 @@ def prepare(
     prepared.embeds = result.embeds[:10]
     if not (content or has_components or result.embeds or result.files):
         prepared.content = t("show.empty")
+    if reply_message and prepared.files and len(prepared.embeds) < 9:
+        referenced = {
+            url.removeprefix("attachment://")
+            for embed in prepared.embeds
+            for url in (
+                embed.author.icon_url,
+                embed.footer.icon_url,
+                embed.thumbnail.url,
+                embed.image.url,
+            )
+            if url and url.startswith("attachment://")
+        }
+        for file in prepared.files:
+            if (
+                len(prepared.embeds) >= 9
+                or file.spoiler
+                or file.filename in referenced
+                or tagscript.media_kind(file.filename, None) != "image"
+            ):
+                continue
+            image = discord.Embed()
+            image.set_image(url=f"attachment://{file.filename}")
+            prepared.embeds.append(image)
     return add_reply(prepared, reply_message) if reply_message else prepared
 
 
