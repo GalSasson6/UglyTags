@@ -281,7 +281,7 @@ async def test_recent_reply_card_and_ping_work_with_all_output_types(script, bot
     )
     card = render.reply_embed(target)
     assert card.description == (
-        "**[Reply to:](https://discord.com/channels/1/2/3)** Original \\*\\*message\\*\\* <@8>"
+        "**[Reply to:](https://discord.com/channels/1/2/3)** Original **message** <@8>"
     )
     assert card.author.name == "sour kraut\u2004\u21a9\ufe0f"
     assert card.author.icon_url == target.author.display_avatar.url
@@ -353,10 +353,19 @@ async def test_reply_card_handles_attachment_only_and_truncated_messages():
     )
     card = render.reply_embed(target)
     assert card.author.name == "author\u2004\u21a9\ufe0f"
-    assert "(click to see attachment)" in card.description
-    assert card.description.endswith(" \U0001f4ce")
+    assert card.description == "*[(click to see attachment)](https://discord.com/channels/1/2/3)*"
     target.content = "x" * 101
     assert "x" * 100 + "\u2026" in render.reply_embed(target).description
+    target.attachments = []
+    target.content = "a\n\n\nb you know that's *our* color <:smil:133817473123456789> " + "y" * 100
+    description = render.reply_embed(target).description
+    assert "a\nb you know that's *our* color <:smil:133817473123456789>" in description
+    assert description.endswith("\u2026")
+    assert description.count("<:smil:133817473123456789>") == 1
+    target.content = "z" * 95 + " <:smil:133817473123456789>"
+    assert render.reply_embed(target).description.endswith("z" * 95 + " \u2026")
+    target.content = "see https://example.com/" + "p" * 300
+    assert "very long link removed" in render.reply_embed(target).description
 
 
 @pytest.mark.parametrize("v2", [False, True])
