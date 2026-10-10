@@ -253,3 +253,37 @@ async def test_lead_embed_joins_plain_output_and_follows_pages():
     await render.send_result(event, runtime(), result, lead_embed=lead)
     assert event.edit_original_response.await_args.kwargs["embeds"] == []
     assert event.followup.send.await_args.kwargs["embed"] is lead
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'text{embedjson:{"title":"tag"}}{attachtext:file}',
+        '{pagejson:[{"content":"a"},{"content":"b"}]}',
+        '{componentjson:{"type":17,"components":[{"type":10,"content":"inside"}]}}',
+    ],
+)
+@pytest.mark.parametrize("bot_author", [False, True])
+async def test_recent_reply_header_and_ping_work_with_all_output_types(script, bot_author):
+    target = SimpleNamespace(
+        content="Original **message** <@8>",
+        jump_url="https://discord.com/channels/1/2/3",
+        author=SimpleNamespace(id=4, mention="<@4>", bot=bot_author),
+    )
+    header = render.reply_header(target)
+    assert "**[Reply to:](https://discord.com/channels/1/2/3)** <@4>" in header
+    assert "\\*\\*message\\*\\*" in header
+    event = SimpleNamespace(edit_original_response=AsyncMock())
+    result = await result_of(script)
+    await render.send_result(event, runtime(), result, title=header, reply_message=target)
+    kwargs = event.edit_original_response.await_args.kwargs
+    mentions = kwargs["allowed_mentions"].to_dict()
+    assert mentions.get("users", []) == ([] if bot_author else [4])
+    assert mentions["parse"] == []
+    assert not mentions.get("replied_user", False)
+    view = kwargs["view"]
+    assert TRASH_ID in custom_ids(view.to_components())
+    if isinstance(view, discord.ui.LayoutView):
+        assert header in view.to_components()[0]["content"]
+    else:
+        assert header in kwargs["content"]

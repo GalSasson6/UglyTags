@@ -1,11 +1,12 @@
 import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
 
+from uglytags import ui
 from uglytags.bot import UglyTags, parse_import_limits
 from uglytags.transfer import ImportLimits
 from uglytags.ui import TagModal, format_size, name_candidates, save_tag, send_export
@@ -67,7 +68,10 @@ def command(bot, *path):
 
 async def test_commands_and_intents():
     bot = UglyTags("postgresql://localhost/test")
-    assert {command.name for command in bot.tree.get_commands()} == {"t", "tag"}
+    assert {command.name for command in bot.tree.get_commands()} == {"t", "tag", "tag reply"}
+    shortcut = bot.tree.get_command("tag reply", type=discord.AppCommandType.message)
+    assert shortcut.guild_only
+    assert shortcut.type == discord.AppCommandType.message
     show = bot.tree.get_command("t")
     assert show.guild_only
     assert [parameter.name for parameter in show.parameters] == ["name", "arguments", "attachment"]
@@ -93,6 +97,138 @@ async def test_commands_and_intents():
     for option in payload["options"]:
         assert len(option["description"]) <= 100
     await bot.close()
+
+
+def reply_target():
+    return SimpleNamespace(
+        guild=SimpleNamespace(id=1),
+        channel=SimpleNamespace(id=3),
+        author=SimpleNamespace(id=4, mention="<@4>", bot=False),
+        content="Original message",
+        jump_url="https://discord.com/channels/1/3/100",
+    )
+
+
+async def test_tag_reply_opens_private_recent_picker(monkeypatch):
+    bot = stats_bot(recent_tags=AsyncMock(return_value=[tag(), tag(id=11, name="second")]))
+    monkeypatch.setattr(ui, "can_send_tag", lambda event: True)
+    event = interaction()
+    shortcut = bot.tree.get_command("tag reply", type=discord.AppCommandType.message)
+    await shortcut.callback(event, reply_target())
+    bot.db.recent_tags.assert_awaited_once_with(1, 2)
+    modal = event.response.send_modal.await_args.args[0]
+    assert modal.title == "tag reply"
+    payload = modal.to_dict()
+    selection = payload["components"][0]["component"]
+    assert selection["type"] == 3
+    assert [(item["label"], item["value"]) for item in selection["options"]] == [
+        ("hello", "10"),
+        ("second", "11"),
+    ]
+    assert payload["components"][2]["component"]["max_values"] == 1
+    assert not payload["components"][1]["component"]["required"]
+    event.response.defer.assert_not_awaited()
+
+    bot.db.recent_tags.return_value = []
+    empty = interaction()
+    await shortcut.callback(empty, reply_target())
+    assert "Run a tag with /t first" in empty.response.send_message.await_args.args[0]
+    assert empty.response.send_message.await_args.kwargs["ephemeral"]
+    empty.response.send_modal.assert_not_awaited()
+    await bot.close()
+
+
+async def test_tag_reply_rechecks_tag_and_uses_public_execution(monkeypatch):
+    bot = stats_bot(get_tag_by_id=AsyncMock(return_value=tag(content="edited")))
+    monkeypatch.setattr(ui, "can_send_tag", lambda event: True)
+    execute = AsyncMock()
+    monkeypatch.setattr(ui, "execute", execute)
+    target = reply_target()
+    modal = ui.RecentTagModal(bot, 2, target, [tag()])
+    modal.tag_select._values = ["10"]
+    modal.arguments._value = "some arguments"
+    attachment = SimpleNamespace(url="https://cdn.discordapp.com/example.png")
+    modal.upload._values = [attachment]
+    event = interaction()
+    event.channel_id = 3
+    await modal.on_submit(event)
+    bot.db.get_tag_by_id.assert_awaited_once_with(10)
+    execute.assert_awaited_once_with(
+        bot,
+        event,
+        bot.db.get_tag_by_id.return_value,
+        "some arguments",
+        attachment,
+        reply_message=target,
+    )
+    event.response.defer.assert_not_awaited()
+
+    execute.reset_mock()
+    for row in (None, tag(guild_id=9)):
+        bot.db.get_tag_by_id.return_value = row
+        missing = interaction()
+        missing.channel_id = 3
+        await modal.on_submit(missing)
+        assert missing.response.send_message.await_args.args[0] == "Unknown Tag"
+        execute.assert_not_awaited()
+
+    bot.db.get_tag_by_id.reset_mock()
+    stranger = interaction(user_id=8)
+    stranger.channel_id = 3
+    await modal.on_submit(stranger)
+    assert "Only the person" in stranger.response.send_message.await_args.args[0]
+    bot.db.get_tag_by_id.assert_not_awaited()
+
+    monkeypatch.setattr(ui, "can_send_tag", lambda event: False)
+    denied = interaction()
+    denied.channel_id = 3
+    await modal.on_submit(denied)
+    assert "send messages here" in denied.response.send_message.await_args.args[0]
+    bot.db.get_tag_by_id.assert_not_awaited()
+    await bot.close()
+
+
+async def test_tag_reply_submission_posts_publicly_and_counts_usage(monkeypatch):
+    row = tag(content="Tag output")
+    bot = stats_bot(get_tag_by_id=AsyncMock(return_value=row), use=AsyncMock())
+    monkeypatch.setattr(ui, "can_send_tag", lambda event: True)
+    target = reply_target()
+    modal = ui.RecentTagModal(bot, 2, target, [row])
+    modal.tag_select._values = ["10"]
+    event = interaction()
+    event.guild = target.guild
+    event.channel = target.channel
+    event.channel_id = target.channel.id
+    event.filesize_limit = 20_000_000
+    event.edit_original_response = AsyncMock()
+    await modal.on_submit(event)
+    event.response.defer.assert_awaited_once_with(ephemeral=False, thinking=True)
+    bot.db.use.assert_awaited_once_with(row, 1, 2)
+    output = event.edit_original_response.await_args.kwargs
+    assert "Reply to:" in output["content"] and "Tag output" in output["content"]
+    assert output["allowed_mentions"].to_dict()["users"] == [4]
+    assert output["view"].children[0].user_id == 2
+    await bot.close()
+
+
+@pytest.mark.parametrize("thread", [False, True])
+def test_tag_reply_checks_channel_permissions_for_member_and_bot(thread):
+    event = interaction()
+    event.guild = SimpleNamespace(me=SimpleNamespace(id=99))
+    event.channel = MagicMock(spec=discord.Thread if thread else discord.TextChannel)
+    allowed = discord.Permissions(view_channel=True)
+    if thread:
+        allowed.send_messages_in_threads = True
+    else:
+        allowed.send_messages = True
+    event.channel.permissions_for.return_value = allowed
+    assert ui.can_send_tag(event)
+    assert [call.args[0].id for call in event.channel.permissions_for.call_args_list] == [2, 99]
+    for values in ([discord.Permissions.none(), allowed], [allowed, discord.Permissions.none()]):
+        event.channel.permissions_for.side_effect = values
+        assert not ui.can_send_tag(event)
+    event.channel = None
+    assert not ui.can_send_tag(event)
 
 
 def test_modal_uses_paragraph_and_file_upload():

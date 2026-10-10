@@ -6,7 +6,7 @@ PostgreSQL. Licensed under MIT.
 
 ## Commands
 
-All commands are slash commands and work in servers only. Tags belong to the server
+Commands work in servers only, using slash commands and a message Apps shortcut. Tags belong to the server
 they were created in. Tag names are 1-100 characters and are matched
 case-insensitively. Management replies are private; `/t` and `/tag random` post
 publicly. Every public tag message has a red trash can button that deletes it; the
@@ -18,6 +18,16 @@ delete button is left out.
   `attachment` is used by `{image}`, `{media}`, and similar functions. Discord does
   not allow `/tag` to take a tag name because it has subcommands, so showing a tag
   uses NotSoBot's `t` alias.
+- **Apps > tag reply**: right-click a message (or long-press on mobile)
+  and choose this shortcut. A private form offers your 25 most recently used tags in
+  this server, newest first, with optional arguments and one attachment. Submitting
+  posts the tag publicly with a small linked reply header and an author mention,
+  like CopyCat's reply shortcut. Only that author can be pinged; bots are not pinged.
+  The usual TagScript, usage counting, and trash can controls still apply. History
+  uses the retained one-year use log, including tags run through aliases, groups,
+  and nested tags; previews do not enter history. Deleted tags are left out, and
+  renamed tags appear with their current names. Both you and the bot need permission
+  to view the channel and send messages there.
 - `/tag create name [content]`: creates a tag. Without `content`, a form opens with
   multi-line content and up to 10 file uploads. If the name is taken, nothing is
   overwritten: the bot asks whether to overwrite it (only offered to the tag's owner

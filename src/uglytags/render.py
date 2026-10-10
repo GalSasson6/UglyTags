@@ -92,6 +92,16 @@ def delete_view(user_id: int) -> discord.ui.View:
     return view
 
 
+def reply_header(message: discord.Message) -> str:
+    snippet = discord.utils.escape_markdown(" ".join(message.content.split())[:100])
+    return t(
+        "recent.reply",
+        link=message.jump_url,
+        author=message.author.mention,
+        text=snippet or t("recent.reply_attachment"),
+    )
+
+
 class ComponentSession:
     def __init__(self, rt: tagscript.Runtime, result: tagscript.TagResult, editor):
         self.rt = rt
@@ -455,7 +465,12 @@ def prepare(rt: tagscript.Runtime, result: tagscript.TagResult, title: str = "",
 
 
 async def send_result(
-    interaction: discord.Interaction, rt, result, title: str = "", lead_embed=None
+    interaction: discord.Interaction,
+    rt,
+    result,
+    title: str = "",
+    lead_embed=None,
+    reply_message: discord.Message | None = None,
 ):
     lead = [lead_embed] if lead_embed else []
     try:
@@ -469,7 +484,15 @@ async def send_result(
     if lead and not separate_lead:
         prepared.embeds = lead + prepared.embeds[:9]
     try:
-        await interaction.edit_original_response(**prepared.edit_kwargs())
+        kwargs = prepared.edit_kwargs()
+        if reply_message is not None:
+            kwargs["allowed_mentions"] = discord.AllowedMentions(
+                everyone=False,
+                roles=False,
+                users=[reply_message.author] if not reply_message.author.bot else False,
+                replied_user=False,
+            )
+        await interaction.edit_original_response(**kwargs)
     except discord.HTTPException as error:
         log.warning("Tag response failed: %s", error)
         if prepared.view:

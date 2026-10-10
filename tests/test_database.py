@@ -58,6 +58,35 @@ async def test_tag_lifecycle_and_case_insensitive_names(db):
     assert renamed["last_used_at"] is not None
 
 
+async def test_recent_tags_are_personal_guild_scoped_unique_and_limited(db):
+    ids = [new_id() for _ in range(27)]
+    for index, tag_id in enumerate(ids):
+        await db.create_tag(tag_id, 1, f"tag{index:02}", "hi", 7)
+        await db.use(await db.get_tag_by_id(tag_id), 1, 5)
+        await db.execute(
+            "UPDATE tag_uses SET used_at = now() - (%s * INTERVAL '1 minute') WHERE tag_id = %s",
+            (index, tag_id),
+        )
+    await db.use(await db.get_tag_by_id(ids[4]), 1, 5)
+    await db.rename(ids[4], "renamed")
+    other_guild = new_id()
+    await db.create_tag(other_guild, 2, "other guild", "hi", 7)
+    await db.use(await db.get_tag_by_id(other_guild), 2, 5)
+    await db.use(await db.get_tag_by_id(ids[26]), 1, 6)
+    recent = await db.recent_tags(1, 5)
+    assert len(recent) == 25
+    assert [row["id"] for row in recent] == [ids[4], *ids[:4], *ids[5:25]]
+    assert recent[0]["name"] == "renamed"
+    assert [row["id"] for row in await db.recent_tags(1, 6)] == [ids[26]]
+    assert await db.recent_tags(1, 99) == []
+    await db.delete(ids[4])
+    assert all(row["id"] != ids[4] for row in await db.recent_tags(1, 5))
+    await db.execute(
+        "UPDATE tag_uses SET used_at = now() - INTERVAL '2 years' WHERE guild_id = %s", (1,)
+    )
+    assert await db.recent_tags(1, 5) == []
+
+
 async def test_aliases_follow_and_cascade(db):
     tag_id, alias_id = new_id(), new_id()
     await db.create_tag(tag_id, 1, "original", "content", 7)

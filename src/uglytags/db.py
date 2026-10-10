@@ -209,6 +209,21 @@ class Database:
         )
         return cursor.rowcount
 
+    async def recent_tags(self, guild_id: int, user_id: int):
+        cursor = await self.execute(
+            f"""SELECT {TAG_COLUMNS} FROM {TAG_FROM}
+                JOIN (
+                    SELECT tag_id, max(used_at) AS used_at FROM tag_uses
+                    WHERE guild_id = %s AND user_id = %s
+                        AND used_at >= now() - INTERVAL '1 year'
+                    GROUP BY tag_id
+                ) recent ON recent.tag_id = t.id
+                WHERE t.guild_id = %s
+                ORDER BY recent.used_at DESC, lower(t.name), t.id LIMIT 25""",
+            (guild_id, user_id, guild_id),
+        )
+        return await cursor.fetchall()
+
     async def fetchall(self, query: str, params: tuple | list = ()):
         cursor = await self.execute(query, params)
         return await cursor.fetchall()

@@ -118,6 +118,65 @@ class TagModal(discord.ui.Modal):
         await report_error(interaction, error)
 
 
+class RecentTagModal(discord.ui.Modal):
+    def __init__(self, bot, owner_id: int, message: discord.Message, tags: list[dict]):
+        super().__init__(title=t("recent.title"), timeout=CONFIRM_TIMEOUT)
+        self.bot, self.owner_id, self.message = bot, owner_id, message
+        self.tag_ids = {row["id"] for row in tags}
+        self.tag_select = discord.ui.Select(
+            options=[discord.SelectOption(label=row["name"], value=str(row["id"])) for row in tags]
+        )
+        self.arguments = discord.ui.TextInput(required=False, max_length=4000)
+        self.upload = discord.ui.FileUpload(required=False, min_values=0, max_values=1)
+        self.add_item(discord.ui.Label(text=t("recent.tag"), component=self.tag_select))
+        self.add_item(discord.ui.Label(text=t("option.arguments"), component=self.arguments))
+        self.add_item(discord.ui.Label(text=t("option.attachment"), component=self.upload))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if (
+            interaction.user.id != self.owner_id
+            or interaction.guild_id != self.message.guild.id
+            or interaction.channel_id != self.message.channel.id
+        ):
+            await reply(interaction, t("error.owner"))
+            return
+        if not can_send_tag(interaction):
+            await reply(interaction, t("error.recent_permissions"))
+            return
+        tag_id = int(self.tag_select.values[0])
+        tag = await self.bot.db.get_tag_by_id(tag_id) if tag_id in self.tag_ids else None
+        if tag is None or tag["guild_id"] != interaction.guild_id:
+            await reply(interaction, t("error.unknown_tag"))
+            return
+        await execute(
+            self.bot,
+            interaction,
+            tag,
+            self.arguments.value,
+            self.upload.values[0] if self.upload.values else None,
+            reply_message=self.message,
+        )
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        await report_error(interaction, error)
+
+
+def can_send_tag(interaction: discord.Interaction) -> bool:
+    channel = interaction.channel
+    if not isinstance(channel, discord.abc.GuildChannel | discord.Thread):
+        return False
+    for member in (interaction.user, interaction.guild.me):
+        allowed = channel.permissions_for(member)
+        send = (
+            allowed.send_messages_in_threads
+            if isinstance(channel, discord.Thread)
+            else (allowed.send_messages)
+        )
+        if not (allowed.view_channel and send):
+            return False
+    return True
+
+
 async def save_tag(
     bot,
     interaction: discord.Interaction,
@@ -170,9 +229,12 @@ async def execute(
     attachment,
     title="",
     lead_embed=None,
+    reply_message: discord.Message | None = None,
 ):
     preview = lead_embed is not None
     lead = [lead_embed] if preview else []
+    if reply_message is not None:
+        title = render.reply_header(reply_message)
     if not interaction.response.is_done():
         await interaction.response.defer(ephemeral=preview, thinking=True)
     if not preview:
@@ -205,7 +267,7 @@ async def execute(
             interaction, "\n\n".join(part for part in (title, str(error)) if part), lead
         )
         return
-    await render.send_result(interaction, rt, result, title, lead_embed)
+    await render.send_result(interaction, rt, result, title, lead_embed, reply_message)
 
 
 def info_embed(
@@ -570,6 +632,23 @@ def register_commands(bot):
     group = app_commands.Group(name="tag", description=t("command.tag"), guild_only=True)
     list_group = app_commands.Group(name="list", description=t("command.list"), parent=group)
     remove_group = app_commands.Group(name="remove", description=t("command.remove"), parent=group)
+
+    @app_commands.guild_only()
+    async def recent_tags(interaction: discord.Interaction, message: discord.Message):
+        if not can_send_tag(interaction):
+            await reply(interaction, t("error.recent_permissions"))
+            return
+        tags = await bot.db.recent_tags(interaction.guild_id, interaction.user.id)
+        if not tags:
+            await reply(interaction, t("recent.empty"))
+            return
+        await interaction.response.send_modal(
+            RecentTagModal(bot, interaction.user.id, message, tags)
+        )
+
+    bot.tree.add_command(
+        app_commands.ContextMenu(name=t("command.recent_tags"), callback=recent_tags)
+    )
 
     async def all_tags(interaction: discord.Interaction, current: str):
         names = await bot.db.autocomplete(interaction.guild_id, current)

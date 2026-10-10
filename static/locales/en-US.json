@@ -1,6 +1,13 @@
 {
   "command.tag": "Custom server tags",
   "command.show": "Show a tag",
+  "command.recent_tags": "tag reply",
+  "recent.title": "tag reply",
+  "recent.tag": "Your recently used tags (newest first)",
+  "recent.empty": "You have not used any tags in this server in the retained use history. Run a tag with /t first.",
+  "recent.reply": "**[Reply to:]({link})** {author} {text}",
+  "recent.reply_attachment": "(click to see attachment)",
+  "error.recent_permissions": "You and the bot must both be able to view this channel and send messages here.",
   "command.create": "Create a tag",
   "command.edit": "Edit one of your tags",
   "command.alias": "Create a tag alias",
