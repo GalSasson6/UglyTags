@@ -1,7 +1,6 @@
 import io
 import json
 import logging
-import re
 from dataclasses import dataclass, field
 
 import discord
@@ -16,12 +15,6 @@ COMPONENT_TIMEOUT = 60
 PAGE_TIMEOUT = 300
 MAX_V2_COMPONENTS = 40
 TRASH_EMOJI = "\U0001f5d1\ufe0f"
-REPLY_BLANK_LINES = re.compile(r"(?:(?:([_*]) \1)?\n){2,}")
-REPLY_EMOJI_TOKEN = re.compile(r"<a?:[^:>]+:\d+>")
-REPLY_URL = re.compile(
-    r"(http|https)(:\/\/)?(www\.)?([-a-zA-Z0-9@:%._\+~#=]{1,256})?\.?([a-zA-Z0-9()]{1,6})?"
-    r"\b([-a-zA-Z0-9()@:%_\+.~#?&//=]*)$"
-)
 
 
 @dataclass
@@ -99,41 +92,19 @@ def delete_view(user_id: int) -> discord.ui.View:
     return view
 
 
-def safe_truncate(text: str, limit: int) -> str:
-    if len(text) <= limit:
-        return text
-    cut = limit
-    start = text.rfind("<", 0, cut)
-    if start >= 0:
-        token = REPLY_EMOJI_TOKEN.match(text, start)
-        if token and token.end() > cut:
-            cut = start
-    while 0 < cut < len(text) and text[cut] in "\ufe0f\u200d":
-        cut -= 1
-    return text[:cut]
-
-
-def reply_description(message: discord.Message) -> str:
-    link = message.jump_url
-    if not message.content.strip():
-        return t("recent.reply_attachment", link=link)
-    text = REPLY_BLANK_LINES.sub("\n", message.content)
+def reply_embed(message: discord.Message) -> discord.Embed:
+    text = " ".join(message.content.split())
+    snippet = discord.utils.escape_markdown(text[:100])
     if len(text) > 100:
-        text = safe_truncate(text, 100)
-        if REPLY_URL.search(text):
-            text += message.content[100:].split(" ")[0]
-            if len(text) > 300:
-                text = REPLY_URL.sub(lambda _: t("recent.reply_long_link", link=link), text)
-        if text != message.content:
-            text += "\u2026"
-    description = t("recent.reply", link=link, text=text)
+        snippet += "\u2026"
+    description = t(
+        "recent.reply",
+        link=message.jump_url,
+        text=snippet or t("recent.reply_attachment"),
+    )
     if message.attachments or message.embeds:
         description += " \U0001f4ce"
-    return description
-
-
-def reply_embed(message: discord.Message) -> discord.Embed:
-    embed = discord.Embed(description=reply_description(message))
+    embed = discord.Embed(description=description)
     embed.set_author(
         name=t("recent.reply_author", name=message.author.global_name or message.author.name),
         icon_url=str(message.author.display_avatar.url),
