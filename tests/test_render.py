@@ -314,6 +314,31 @@ async def test_recent_reply_card_and_ping_work_with_all_output_types(script, bot
             assert updated["embeds"][-1].to_dict() == card.to_dict()
 
 
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        ("this is a TEST do not WORRY", "this is a TEST do not WORRY\n-# <@4>"),
+        (None, "-# <@4>"),
+        ("first line\nsecond line", "first line\nsecond line\n-# <@4>"),
+    ],
+)
+def test_reply_mention_matches_copycat_app_reply_format(content, expected):
+    target = SimpleNamespace(
+        content="original",
+        jump_url="https://discord.com/channels/1/2/3",
+        author=SimpleNamespace(
+            mention="<@4>",
+            global_name="author",
+            name="author",
+            display_avatar=SimpleNamespace(url="https://cdn.discordapp.com/avatars/4/avatar.png"),
+        ),
+        attachments=[],
+        embeds=[],
+    )
+    prepared = render.add_reply(render.Prepared(content=content), target)
+    assert prepared.edit_kwargs()["content"] == expected
+
+
 async def test_reply_card_handles_attachment_only_and_truncated_messages():
     target = SimpleNamespace(
         content="",
