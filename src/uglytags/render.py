@@ -1,7 +1,6 @@
 import io
 import json
 import logging
-import mimetypes
 import re
 from dataclasses import dataclass, field
 
@@ -556,14 +555,13 @@ def prepare(
         if content:
             prepared.view.add_item(discord.ui.TextDisplay(content))
         for file in prepared.files:
-            media_type = mimetypes.guess_type(file.filename)[0] or ""
             filename = (
                 f"SPOILER_{file.filename}"
                 if file.spoiler and not file.filename.startswith("SPOILER_")
                 else file.filename
             )
             attachment = f"attachment://{filename}"
-            if media_type.startswith(("image/", "video/")):
+            if tagscript.media_kind(file.filename, None) in ("image", "video"):
                 prepared.view.add_item(
                     discord.ui.MediaGallery(
                         discord.MediaGalleryItem(
