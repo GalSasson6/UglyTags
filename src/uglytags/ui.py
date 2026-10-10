@@ -33,9 +33,9 @@ log = logging.getLogger(__name__)
 CONFIRM_TIMEOUT = 300
 REMOVE_ALL_TIMEOUT = 120
 LIST_PAGE_SIZE = 25
+DETAIL_PAGE_SIZE = 10
 PERIODS = (0, 7, 30, 365)
 SORTS = ("most", "least", "recent", "unused", "newest", "oldest")
-PRUNE_PREVIEW = 30
 
 
 async def report_error(interaction: discord.Interaction, error: Exception):
@@ -392,12 +392,17 @@ class RemoveAll(OwnedView):
 
 
 class ListView(OwnedView):
-    def __init__(self, owner_id: int, title: str, lines: list[str], footer: str = ""):
+    def __init__(
+        self,
+        owner_id: int,
+        title: str,
+        lines: list[str],
+        footer: str = "",
+        page_size: int = LIST_PAGE_SIZE,
+    ):
         super().__init__(owner_id, CONFIRM_TIMEOUT)
-        self.title, self.footer, self.index = title, footer, 0
-        self.pages = [
-            lines[index : index + LIST_PAGE_SIZE] for index in range(0, len(lines), LIST_PAGE_SIZE)
-        ]
+        self.title, self.footer, self.index, self.page_size = title, footer, 0, page_size
+        self.pages = [lines[index : index + page_size] for index in range(0, len(lines), page_size)]
         self.update()
 
     def update(self):
@@ -405,11 +410,11 @@ class ListView(OwnedView):
         self.next.disabled = self.index >= len(self.pages) - 1
 
     def embed(self) -> discord.Embed:
-        start = self.index * LIST_PAGE_SIZE
+        start = self.index * self.page_size
         lines = [f"{start + number}. {line}" for number, line in enumerate(self.page(), 1)]
         embed = discord.Embed(title=self.title[:256], description="\n".join(lines)[:4096])
         footer = t("list.footer", page=self.index + 1, pages=len(self.pages))
-        embed.set_footer(text=" | ".join(part for part in (footer, self.footer) if part))
+        embed.set_footer(text=" | ".join(part for part in (footer, self.footer) if part)[:2048])
         return embed
 
     def page(self) -> list[str]:
@@ -426,6 +431,42 @@ class ListView(OwnedView):
         self.index += 1
         self.update()
         await interaction.response.edit_message(embed=self.embed(), view=self)
+
+
+class PrunePreview(ListView):
+    def __init__(self, bot, owner_id: int, guild_id: int, tags: list, title: str, scope: str):
+        super().__init__(owner_id, title, [tag_line(tag) for tag in tags], scope, DETAIL_PAGE_SIZE)
+        self.bot, self.guild_id, self.tags, self.scope = bot, guild_id, tags, scope
+
+    @discord.ui.button(label=t("action.prune"), style=discord.ButtonStyle.danger, row=1)
+    async def confirm(self, interaction, button):
+        self.stop()
+        await interaction.response.defer()
+        count = await self.bot.db.delete_matching(self.guild_id, [tag["id"] for tag in self.tags])
+        await interaction.edit_original_response(
+            content=t("prune.done", count=f"{count:,}", scope=self.scope), embed=None, view=None
+        )
+
+    @discord.ui.button(label=t("action.cancel"), style=discord.ButtonStyle.secondary, row=1)
+    async def cancel(self, interaction, button):
+        self.stop()
+        await interaction.response.edit_message(
+            content=t("prune.cancelled", count=f"{len(self.tags):,}"), embed=None, view=None
+        )
+
+    @discord.ui.button(label=t("action.export"), style=discord.ButtonStyle.secondary, row=1)
+    async def export(self, interaction, button):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await send_export(self.bot, interaction, self.tags, {"prune": self.scope})
+
+    async def on_timeout(self):
+        if self.message:
+            try:
+                await self.message.edit(
+                    content=t("prune.timeout", count=f"{len(self.tags):,}"), embed=None, view=None
+                )
+            except discord.HTTPException:
+                pass
 
 
 def scope_text(user) -> str:
@@ -449,6 +490,33 @@ def period_label(days: int) -> str:
 
 def last_used(value) -> str:
     return f"<t:{int(value.timestamp())}:R>" if value else t("stats.never")
+
+
+def tag_line(row: dict) -> str:
+    return t(
+        "stats.row",
+        name=code(row["name"]),
+        owner=f"<@{row['owner_id']}>",
+        uses=f"{row['ranked_uses']:,}",
+        last_used=last_used(row["last_used_at"]),
+        created=f"<t:{int(row['created_at'].timestamp())}:d>",
+        size=format_size(row["size"]),
+    )
+
+
+def filter_text(owner=None, unused_days=None, max_uses=None, min_age_days=None, limit=None):
+    parts = []
+    if owner is not None:
+        parts.append(t("prune.owner", owner=owner.display_name))
+    if unused_days is not None:
+        parts.append(t("prune.unused_days", days=unused_days))
+    if max_uses is not None:
+        parts.append(t("prune.max_uses", uses=max_uses))
+    if min_age_days:
+        parts.append(t("prune.min_age", days=min_age_days))
+    if limit is not None:
+        parts.append(t("prune.least_used", count=limit))
+    return t("prune.scope", criteria=", ".join(parts)) if parts else ""
 
 
 def ranked(rows: list[dict], line) -> str:
@@ -1003,11 +1071,18 @@ def register_commands(bot):
 
     stats_group = app_commands.Group(name="stats", description=t("command.stats"), parent=group)
     periods = [app_commands.Choice(name=period_label(days), value=days) for days in PERIODS]
+    sorts = [app_commands.Choice(name=t(f"sort.{key}"), value=key) for key in SORTS]
 
-    @stats_group.command(name="server", description=t("command.stats_server"))
+    def user_line(row) -> str:
+        return t("stats.user_line", user=f"<@{row['user_id']}>", uses=f"{row['uses']:,}")
+
+    def use_line(row) -> str:
+        return t("stats.tag_line", name=code(row["name"]), uses=f"{row['uses']:,}")
+
+    @stats_group.command(name="overview", description=t("command.stats_overview"))
     @app_commands.describe(period=t("option.period"))
     @app_commands.choices(period=periods)
-    async def stats_server(interaction: discord.Interaction, period: int = 0):
+    async def stats_overview(interaction: discord.Interaction, period: int = 0):
         await interaction.response.defer(ephemeral=True, thinking=True)
         stats = await bot.db.server_stats(interaction.guild_id, since(period))
         embed = stats_embed(t("stats.server_title", guild=interaction.guild.name), period)
@@ -1020,27 +1095,25 @@ def register_commands(bot):
                 aliases=f"{stats['aliases']:,}",
                 uses=f"{stats['uses']:,}",
                 period_uses=f"{stats['period_uses']:,}",
-                never=f"{stats['never_used']:,}",
-                stale=f"{stats['stale']:,}",
                 storage=format_size(stats["storage"]),
             ),
             inline=False,
         )
         embed.add_field(
-            name=t("stats.most_used"),
-            value=ranked(
-                stats["top_tags"],
-                lambda row: t("stats.tag_line", name=code(row["name"]), uses=f"{row['uses']:,}"),
-            )[:1024],
+            name=t("stats.unused"),
+            value=t(
+                "stats.unused_overview",
+                never=f"{stats['never_used']:,}",
+                once=f"{stats['once']:,}",
+                stale=f"{stats['stale']:,}",
+                stale_90=f"{stats['stale_90']:,}",
+                stale_365=f"{stats['stale_365']:,}",
+            ),
+            inline=False,
         )
+        embed.add_field(name=t("stats.most_used"), value=ranked(stats["top_tags"], use_line)[:1024])
         embed.add_field(
-            name=t("stats.top_users"),
-            value=ranked(
-                stats["top_users"],
-                lambda row: t(
-                    "stats.user_line", user=f"<@{row['user_id']}>", uses=f"{row['uses']:,}"
-                ),
-            )[:1024],
+            name=t("stats.top_users"), value=ranked(stats["top_users"], user_line)[:1024]
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -1071,26 +1144,20 @@ def register_commands(bot):
             inline=False,
         )
         embed.add_field(
-            name=t("stats.top_users"),
-            value=ranked(
-                stats["top_users"],
-                lambda row: t(
-                    "stats.user_line", user=f"<@{row['user_id']}>", uses=f"{row['uses']:,}"
-                ),
-            )[:1024],
+            name=t("stats.top_users"), value=ranked(stats["top_users"], user_line)[:1024]
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @stats_group.command(name="user", description=t("command.stats_user"))
-    @app_commands.describe(user=t("option.stats_user"), period=t("option.period"))
+    @stats_group.command(name="member", description=t("command.stats_member"))
+    @app_commands.describe(member=t("option.stats_member"), period=t("option.period"))
     @app_commands.choices(period=periods)
-    async def stats_user(
-        interaction: discord.Interaction, user: discord.User | None = None, period: int = 0
+    async def stats_member(
+        interaction: discord.Interaction, member: discord.User | None = None, period: int = 0
     ):
-        user = user or interaction.user
+        member = member or interaction.user
         await interaction.response.defer(ephemeral=True, thinking=True)
-        stats = await bot.db.user_stats(interaction.guild_id, user.id, since(period))
-        embed = stats_embed(t("stats.user_title", user=user.display_name), period)
+        stats = await bot.db.user_stats(interaction.guild_id, member.id, since(period))
+        embed = stats_embed(t("stats.user_title", user=member.display_name), period)
         embed.add_field(
             name=t("stats.overview"),
             value=t(
@@ -1103,48 +1170,52 @@ def register_commands(bot):
             ),
             inline=False,
         )
-        embed.add_field(
-            name=t("stats.most_run"),
-            value=ranked(
-                stats["top_tags"],
-                lambda row: t("stats.tag_line", name=code(row["name"]), uses=f"{row['uses']:,}"),
-            )[:1024],
-        )
+        embed.add_field(name=t("stats.most_run"), value=ranked(stats["top_tags"], use_line)[:1024])
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @stats_group.command(name="list", description=t("command.stats_list"))
+    @stats_group.command(name="ranking", description=t("command.stats_ranking"))
     @app_commands.describe(
-        sort=t("option.sort"), period=t("option.period"), user=t("option.filter_user")
+        sort=t("option.sort"),
+        period=t("option.period"),
+        owner=t("option.owner"),
+        unused_days=t("option.unused_days"),
+        max_uses=t("option.max_uses"),
+        min_age_days=t("option.ranking_min_age_days"),
     )
-    @app_commands.choices(
-        sort=[app_commands.Choice(name=t(f"sort.{key}"), value=key) for key in SORTS],
-        period=periods,
-    )
-    async def stats_list(
+    @app_commands.choices(sort=sorts, period=periods)
+    async def stats_ranking(
         interaction: discord.Interaction,
-        sort: str,
+        sort: str = "most",
         period: int = 0,
-        user: discord.User | None = None,
+        owner: discord.User | None = None,
+        unused_days: app_commands.Range[int, 1, 36500] | None = None,
+        max_uses: app_commands.Range[int, 1, 1000000000] | None = None,
+        min_age_days: app_commands.Range[int, 1, 36500] | None = None,
     ):
         await interaction.response.defer(ephemeral=True, thinking=True)
-        rows = await bot.db.ranking(interaction.guild_id, sort, since(period), user and user.id)
+        rows = await bot.db.select_tags(
+            interaction.guild_id,
+            sort=sort,
+            since=since(period),
+            owner_id=owner and owner.id,
+            unused_days=unused_days,
+            max_uses=max_uses,
+            min_age_days=min_age_days,
+        )
+        scope = filter_text(owner, unused_days, max_uses, min_age_days)
         if not rows:
-            await reply(interaction, t("error.no_matching_tags" if user else "error.no_tags"))
+            await reply(interaction, t("prune.none", scope=scope) if scope else t("error.no_tags"))
             return
-        lines = [
-            t(
-                "stats.list_line",
-                name=code(row["name"]),
-                uses=f"{row['uses']:,}",
-                last_used=last_used(row["last_used_at"]),
-                created=f"<t:{int(row['created_at'].timestamp())}:d>",
-            )
-            for row in rows
-        ]
-        title = t("stats.list_title", sort=t(f"sort.{sort}"), guild=interaction.guild.name)
-        if user:
-            title = t("stats.list_user_title", sort=t(f"sort.{sort}"), user=user.display_name)
-        view = ListView(interaction.user.id, title, lines, period_label(period))
+        title = t(
+            "stats.ranking_title",
+            sort=t(f"sort.{sort}"),
+            count=f"{len(rows):,}",
+            guild=interaction.guild.name,
+        )
+        footer = " | ".join(part for part in (period_label(period), scope) if part)
+        view = ListView(
+            interaction.user.id, title, [tag_line(row) for row in rows], footer, DETAIL_PAGE_SIZE
+        )
         await interaction.followup.send(
             embed=view.embed(),
             view=view if len(view.pages) > 1 else discord.utils.MISSING,
@@ -1190,15 +1261,17 @@ def register_commands(bot):
     @group.command(name="prune", description=t("command.prune"))
     @app_commands.describe(
         unused_days=t("option.unused_days"),
-        least_used=t("option.least_used"),
         max_uses=t("option.max_uses"),
+        least_used=t("option.least_used"),
+        owner=t("option.owner"),
         min_age_days=t("option.min_age_days"),
     )
     async def prune(
         interaction: discord.Interaction,
         unused_days: app_commands.Range[int, 1, 36500] | None = None,
-        least_used: app_commands.Range[int, 1, 100000] | None = None,
         max_uses: app_commands.Range[int, 1, 1000000000] | None = None,
+        least_used: app_commands.Range[int, 1, 100000] | None = None,
+        owner: discord.User | None = None,
         min_age_days: app_commands.Range[int, 0, 36500] = 7,
     ):
         if not permissions(interaction).manage_guild:
@@ -1208,39 +1281,27 @@ def register_commands(bot):
             await reply(interaction, t("error.prune_criteria"))
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
-        tags = await bot.db.prune_candidates(
+        tags = await bot.db.select_tags(
             interaction.guild_id,
+            sort="least",
+            owner_id=owner and owner.id,
             unused_days=unused_days,
-            least_used=least_used,
             max_uses=max_uses,
             min_age_days=min_age_days,
+            limit=least_used,
         )
-        parts = []
-        if unused_days is not None:
-            parts.append(t("prune.unused_days", days=unused_days))
-        if max_uses is not None:
-            parts.append(t("prune.max_uses", uses=max_uses))
-        if least_used is not None:
-            parts.append(t("prune.least_used", count=least_used))
-        if min_age_days:
-            parts.append(t("prune.min_age", days=min_age_days))
-        scope = t("prune.scope", criteria=", ".join(parts))
+        scope = filter_text(owner, unused_days, max_uses, min_age_days, least_used)
         if not tags:
             await reply(interaction, t("prune.none", scope=scope))
             return
-        names = ", ".join(code(tag["name"]) for tag in tags[:PRUNE_PREVIEW])
-        if len(tags) > PRUNE_PREVIEW:
-            names += t("prune.more", count=f"{len(tags) - PRUNE_PREVIEW:,}")
-        options = {
-            "unusedDays": unused_days,
-            "leastUsed": least_used,
-            "maxUses": max_uses,
-            "minAgeDays": min_age_days,
-        }
-        view = RemoveAll(bot, interaction.user.id, interaction.guild_id, tags, options, scope)
-        content = t("remove_all.found", count=f"{len(tags):,}", scope=scope) + "\n" + names
+        title = t("prune.title", count=f"{len(tags):,}")
+        view = PrunePreview(bot, interaction.user.id, interaction.guild_id, tags, title, scope)
         view.message = await interaction.followup.send(
-            content[:2000], view=view, ephemeral=True, wait=True
+            t("prune.found", count=f"{len(tags):,}", scope=scope)[:2000],
+            embed=view.embed(),
+            view=view,
+            ephemeral=True,
+            wait=True,
         )
 
     bot.tree.add_command(group)

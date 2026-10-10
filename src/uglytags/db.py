@@ -224,9 +224,16 @@ class Database:
                     count(*) FILTER (WHERE reference_id IS NOT NULL) AS aliases,
                     COALESCE(sum(uses) FILTER (WHERE {REGULAR}), 0) AS uses,
                     count(*) FILTER (WHERE uses = 0) AS never_used,
+                    count(*) FILTER (WHERE uses <= 1) AS once,
                     count(*) FILTER (
                         WHERE COALESCE(last_used_at, created_at) < now() - INTERVAL '30 days'
-                    ) AS stale
+                    ) AS stale,
+                    count(*) FILTER (
+                        WHERE COALESCE(last_used_at, created_at) < now() - INTERVAL '90 days'
+                    ) AS stale_90,
+                    count(*) FILTER (
+                        WHERE COALESCE(last_used_at, created_at) < now() - INTERVAL '365 days'
+                    ) AS stale_365
                 FROM tags t WHERE guild_id = %s""",
             (guild_id,),
         )
@@ -314,8 +321,17 @@ class Database:
             "storage": storage["total"],
         }
 
-    async def ranking(
-        self, guild_id: int, sort: str, since: datetime | None, owner_id: int | None = None
+    async def select_tags(
+        self,
+        guild_id: int,
+        *,
+        sort: str = "most",
+        since: datetime | None = None,
+        owner_id: int | None = None,
+        unused_days: int | None = None,
+        max_uses: int | None = None,
+        min_age_days: int | None = None,
+        limit: int | None = None,
     ) -> list[dict]:
         count = "COALESCE(p.uses, 0)" if since else "t.uses"
         order = {
@@ -326,28 +342,10 @@ class Database:
             "newest": "t.created_at DESC, lower(t.name)",
             "oldest": "t.created_at ASC, lower(t.name)",
         }[sort]
-        return await self.fetchall(
-            f"""SELECT t.name, {count} AS uses, t.last_used_at, t.created_at
-                FROM tags t LEFT JOIN (
-                    SELECT tag_id, count(*) AS uses FROM tag_uses
-                    WHERE guild_id = %s AND used_at >= %s GROUP BY tag_id
-                ) p ON p.tag_id = t.id
-                WHERE t.guild_id = %s AND (%s::bigint IS NULL OR t.owner_id = %s)
-                ORDER BY {order}""",
-            (guild_id, since or EPOCH, guild_id, owner_id, owner_id),
-        )
-
-    async def prune_candidates(
-        self,
-        guild_id: int,
-        *,
-        unused_days: int | None,
-        least_used: int | None,
-        max_uses: int | None,
-        min_age_days: int,
-    ) -> list[dict]:
-        clauses = ["t.guild_id = %s", "t.created_at <= now() - make_interval(days => %s)"]
-        params: list = [guild_id, min_age_days]
+        clauses, params = ["t.guild_id = %s"], [guild_id]
+        if owner_id is not None:
+            clauses.append("t.owner_id = %s")
+            params.append(owner_id)
         if unused_days is not None:
             clauses.append(
                 "(t.last_used_at IS NULL OR t.last_used_at < now() - make_interval(days => %s))"
@@ -356,12 +354,23 @@ class Database:
         if max_uses is not None:
             clauses.append("t.uses < %s")
             params.append(max_uses)
-        query = f"""SELECT {TAG_COLUMNS} FROM {TAG_FROM} WHERE {" AND ".join(clauses)}
-                    ORDER BY t.uses, COALESCE(t.last_used_at, t.created_at), lower(t.name)"""
-        if least_used is not None:
+        if min_age_days:
+            clauses.append("t.created_at <= now() - make_interval(days => %s)")
+            params.append(min_age_days)
+        query = f"""SELECT {TAG_COLUMNS}, {count} AS ranked_uses, {SIZE_COLUMNS}
+                    FROM {TAG_FROM} LEFT JOIN (
+                        SELECT tag_id, count(*) AS uses FROM tag_uses
+                        WHERE guild_id = %s AND used_at >= %s GROUP BY tag_id
+                    ) p ON p.tag_id = t.id
+                    WHERE {" AND ".join(clauses)} ORDER BY {order}"""
+        params = [guild_id, since or EPOCH, *params]
+        if limit is not None:
             query += " LIMIT %s"
-            params.append(least_used)
-        return await self.fetchall(query, params)
+            params.append(limit)
+        rows = await self.fetchall(query, params)
+        for row in rows:
+            row["size"] = row["text"] + row["files"] + row["variables"]
+        return rows
 
     async def storage(self, guild_id: int) -> dict:
         totals = await self.fetchone(

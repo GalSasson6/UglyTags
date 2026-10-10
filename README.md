@@ -51,26 +51,33 @@ delete button is left out.
   administrators can add or remove any of the server's tags, up to 100 per group.
   Groups cannot contain other groups or have content of their own, and a deleted tag
   leaves every group it was in.
-- `/tag stats server [period]`: an overview with tag and use totals, uses in the
-  period, never-used tags, tags unused for 30+ days, storage, the 10 most used tags,
-  and the 5 members who ran the most tags.
+- `/tag stats overview [period]`: tag and use totals, uses in the period, storage,
+  the 10 most used tags, the 5 members who ran the most tags, and an unused-tags
+  summary (never used, used at most once, and not used in 30, 90, or 365+ days) to
+  size up a prune.
 - `/tag stats tag name [period]`: one tag's uses (all time and in the period), last
   use, creation, owner, storage, and top members.
-- `/tag stats user [user] [period]`: a member's tag count, uses of their tags, tags
-  they ran, storage, and the tags they ran most.
-- `/tag stats list sort [period] [user]`: a paged ranking of every tag, or only the
-  tags a member owns, by most used, least used, recently used, longest unused,
-  newest, or oldest.
+- `/tag stats member [member] [period]`: a member's tag count, uses of their tags,
+  tags they ran, storage, and the tags they ran most.
+- `/tag stats ranking [sort] [period] [owner] [unused_days] [max_uses] [min_age_days]`:
+  a paged ranking (default: most used) by most used, least used, recently used,
+  longest unused, newest, or oldest. Each row shows the tag, owner, uses, last use,
+  creation date, and size. The filters work exactly like `/tag prune`'s, so running it
+  with the same values previews what a prune would match.
 - `/tag stats storage`: the server's storage use (files, tag text, and stored
   variables), the largest tags, and the members using the most storage. Sizes use
   1 MB = 1,000,000 bytes.
-- `/tag prune [unused_days] [least_used] [max_uses] [min_age_days]`: removes unused
-  tags after a preview with Continue, Cancel, and Export buttons. `unused_days`
-  matches tags not used in that many days (never-used tags count), `max_uses` matches
-  tags with fewer total uses, and `least_used` keeps only that many of the least-used
-  matches. Give at least one; combined criteria must all match. Tags created in the
-  last `min_age_days` (default 7) are never pruned. Aliases and groups can be pruned
-  like any tag, and pruning a tag also removes its aliases.
+- `/tag prune [unused_days] [max_uses] [least_used] [owner] [min_age_days]`: removes
+  unused tags. `unused_days` matches tags not used in that many days (never-used tags
+  count), `max_uses` matches tags with fewer total uses, `owner` limits it to one
+  member's tags, and `least_used` keeps only that many of the least-used matches.
+  Give at least one of `unused_days`, `max_uses`, or `least_used`; combined criteria
+  must all match. Tags created in the last `min_age_days` (default 7) are never
+  pruned. Before anything is removed, it lists every matching tag in the same detailed
+  format as the ranking, across as many pages as needed, with "Remove these tags",
+  Cancel, and Export buttons. Removing deletes exactly the listed tags; nothing
+  happens if no button is pressed within five minutes. Aliases and groups can be
+  pruned like any tag, and pruning a tag also removes its aliases.
 
 Stats are visible to everyone as private replies; the period is the last 7 days, 30
 days, year, or all time (the default). Running an alias also counts as a use of its

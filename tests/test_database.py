@@ -256,10 +256,18 @@ async def test_use_log_stats_and_ranking(db):
     owner = await db.user_stats(1, 7, None)
     assert owner["tags"] == 3 and owner["uses"] == 3 and owner["storage"] > 5
 
-    assert [row["name"] for row in await db.ranking(1, "most", None)][0] == "hello"
-    assert [row["name"] for row in await db.ranking(1, "least", None)][0] == "quiet"
-    assert (await db.ranking(1, "recent", None))[-1]["last_used_at"] is None
-    assert [row["name"] for row in await db.ranking(1, "most", None, 8)] == ["quiet"]
+    async def ranking(sort, **options):
+        return await db.select_tags(1, sort=sort, **options)
+
+    assert [row["name"] for row in await ranking("most")][0] == "hello"
+    assert [row["name"] for row in await ranking("least")][0] == "quiet"
+    assert (await ranking("recent"))[-1]["last_used_at"] is None
+    assert [row["name"] for row in await ranking("most", owner_id=8)] == ["quiet"]
+    hello_row = (await ranking("most"))[0]
+    assert (hello_row["ranked_uses"], hello_row["size"]) == (3, 5 + len("hello") + len("hi"))
+    recent_rows = await ranking("most", since=datetime.now(UTC) - timedelta(days=30))
+    assert {row["name"]: row["ranked_uses"] for row in recent_rows}["hello"] == 1
+    assert stats["once"] == 3 and stats["stale_90"] == 0
 
     await db.execute("UPDATE tag_uses SET used_at = now() - INTERVAL '2 years' WHERE user_id = 100")
     assert await db.cleanup_uses() == 3
@@ -286,9 +294,10 @@ async def test_prune_candidates_and_storage(db):
         )
 
     async def names(**options):
-        options = {"unused_days": None, "least_used": None, "max_uses": None, **options}
         options.setdefault("min_age_days", 7)
-        return [tag["name"] for tag in await db.prune_candidates(1, **options)]
+        least_used = options.pop("least_used", None)
+        rows = await db.select_tags(1, sort="least", limit=least_used, **options)
+        return [tag["name"] for tag in rows]
 
     assert await names(unused_days=30) == ["never", "stale"]
     assert await names(unused_days=30, min_age_days=0) == ["never", "fresh", "stale"]
@@ -296,6 +305,7 @@ async def test_prune_candidates_and_storage(db):
     assert await names(least_used=2) == ["never", "rare"]
     assert await names(unused_days=5, max_uses=10) == ["never", "rare", "stale"]
     assert await names(unused_days=5, least_used=1) == ["never"]
+    assert await names(unused_days=5, owner_id=99) == []
 
     await db.create_tag(new_id(), 2, "elsewhere", "x" * 1000, 9, {"big.bin": b"0" * 2000})
     storage = await db.storage(2)

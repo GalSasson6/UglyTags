@@ -476,38 +476,64 @@ def stats_event(**permissions):
     return event
 
 
+def ranked_row(index, **overrides):
+    row = tag(id=index, name=f"t{index}", owner_id=5)
+    row.update(ranked_uses=index, last_used_at=None, size=1500)
+    row.update(overrides)
+    return row
+
+
 async def test_prune_requires_manage_server_and_criteria():
-    bot = stats_bot(prune_candidates=AsyncMock(return_value=[]))
+    bot = stats_bot(select_tags=AsyncMock(return_value=[]))
     event = stats_event()
-    await command(bot, "prune")(event, 30, None, None, 7)
+    await command(bot, "prune")(event, 30, None, None, None, 7)
     assert "permission" in event.response.send_message.await_args.args[0]
     event = stats_event(manage_guild=True)
-    await command(bot, "prune")(event, None, None, None, 7)
+    await command(bot, "prune")(event, None, None, None, None, 7)
     assert "at least one" in event.response.send_message.await_args.args[0]
-    bot.db.prune_candidates.assert_not_awaited()
+    bot.db.select_tags.assert_not_awaited()
     event = stats_event(manage_guild=True)
-    await command(bot, "prune")(event, 30, 5, None, 7)
-    assert bot.db.prune_candidates.await_args.kwargs == {
+    owner = SimpleNamespace(id=5, display_name="Dvir")
+    await command(bot, "prune")(event, 30, None, 5, owner, 7)
+    assert bot.db.select_tags.await_args.kwargs == {
+        "sort": "least",
+        "owner_id": 5,
         "unused_days": 30,
-        "least_used": 5,
         "max_uses": None,
         "min_age_days": 7,
+        "limit": 5,
     }
-    assert "No tags match" in event.followup.send.await_args.args[0]
+    message = event.followup.send.await_args.args[0]
+    assert message.startswith("No tags match. (Tags owned by Dvir, not used in 30 days")
     await bot.close()
 
 
-async def test_prune_preview_offers_remove_all_controls():
-    rows = [tag(id=index, name=f"t{index}") for index in range(40)]
-    bot = stats_bot(prune_candidates=AsyncMock(return_value=rows))
+async def test_prune_shows_every_tag_before_removing():
+    rows = [ranked_row(index) for index in range(25)]
+    bot = stats_bot(
+        select_tags=AsyncMock(return_value=rows), delete_matching=AsyncMock(return_value=25)
+    )
     event = stats_event(manage_guild=True)
-    await command(bot, "prune")(event, 30, None, None, 7)
-    content = event.followup.send.await_args.args[0]
-    assert content.startswith("Found 40 tags to delete. (Tags not used in 30 days")
-    assert "`t0`" in content and "and 10 more" in content
-    view = event.followup.send.await_args.kwargs["view"]
-    assert [item.label for item in view.children] == ["Continue", "Cancel", "Export"]
-    assert len(view.tags) == 40
+    await command(bot, "prune")(event, 30, None, None, None, 7)
+    kwargs = event.followup.send.await_args.kwargs
+    view, embed = kwargs["view"], kwargs["embed"]
+    assert event.followup.send.await_args.args[0].startswith("Review the 25 tags below")
+    assert embed.title == "25 tags will be removed"
+    assert embed.description.startswith("1. `t0` by <@5>\n    0 uses, last used never")
+    assert "1.50 KB" in embed.description
+    assert len(view.pages) == 3
+    labels = [item.label for item in view.children]
+    assert labels == ["<", ">", "Remove these tags", "Cancel", "Export"]
+
+    click = SimpleNamespace(
+        response=SimpleNamespace(defer=AsyncMock(), edit_message=AsyncMock()),
+        edit_original_response=AsyncMock(),
+    )
+    await view.next.callback(click)
+    assert click.response.edit_message.await_args.kwargs["embed"].description.startswith("11.")
+    await view.confirm.callback(click)
+    bot.db.delete_matching.assert_awaited_once_with(1, [row["id"] for row in rows])
+    assert "Removed 25 tags" in click.edit_original_response.await_args.kwargs["content"]
     await bot.close()
 
 
@@ -522,15 +548,16 @@ async def test_stats_commands_render():
                 "uses": 12,
                 "period_uses": 4,
                 "never_used": 1,
+                "once": 2,
                 "stale": 2,
+                "stale_90": 1,
+                "stale_365": 0,
                 "storage": 2_500_000,
                 "top_tags": [{"name": "hello", "uses": 9}],
                 "top_users": [{"user_id": 5, "uses": 4}],
             }
         ),
-        ranking=AsyncMock(
-            return_value=[{"name": "hello", "uses": 9, "last_used_at": None, "created_at": now}]
-        ),
+        select_tags=AsyncMock(return_value=[ranked_row(9, name="hello", created_at=now)]),
         storage=AsyncMock(
             return_value={
                 "total": 3000,
@@ -543,29 +570,34 @@ async def test_stats_commands_render():
             }
         ),
     )
+    names = {command.name for command in bot.tree.get_command("tag").get_command("stats").commands}
+    assert names == {"overview", "tag", "member", "ranking", "storage"}
+
     event = stats_event()
-    await command(bot, "stats", "server")(event, 30)
+    await command(bot, "stats", "overview")(event, 30)
     embed = event.followup.send.await_args.kwargs["embed"]
     assert embed.description == "Last 30 days"
     assert "**Storage**: 2.50 MB" in embed.fields[0].value
-    assert "`hello`: 9 uses" in embed.fields[1].value
-    assert "<@5>: 4 uses" in embed.fields[2].value
+    assert "**Not used in 90+ days**: 1" in embed.fields[1].value
+    assert "`hello`: 9 uses" in embed.fields[2].value
+    assert "<@5>: 4 uses" in embed.fields[3].value
     assert bot.db.server_stats.await_args.args[1] > now - timedelta(days=31)
 
     event = stats_event()
-    await command(bot, "stats", "list")(event, "least", 0)
+    await command(bot, "stats", "ranking")(event, "least", 0, None, None, None, None)
     embed = event.followup.send.await_args.kwargs["embed"]
-    assert embed.title == "Least used tags in Server"
-    assert embed.description.startswith("1. `hello`: 9 uses, last used never")
-    assert bot.db.ranking.await_args.args[1:] == ("least", None, None)
+    assert embed.title == "Least used: 1 tags in Server"
+    assert embed.description.startswith("1. `hello` by <@5>\n    9 uses, last used never")
+    assert bot.db.select_tags.await_args.kwargs["sort"] == "least"
 
     event = stats_event()
     owner = SimpleNamespace(id=5, display_name="Dvir")
-    await command(bot, "stats", "list")(event, "most", 7, owner)
-    embed = event.followup.send.await_args.kwargs["embed"]
-    assert embed.title == "Most used tags owned by Dvir"
-    assert bot.db.ranking.await_args.args[1] == "most"
-    assert bot.db.ranking.await_args.args[3] == 5
+    await command(bot, "stats", "ranking")(event, "most", 7, owner, 30, 2, 14)
+    kwargs = bot.db.select_tags.await_args.kwargs
+    assert (kwargs["owner_id"], kwargs["unused_days"], kwargs["max_uses"]) == (5, 30, 2)
+    assert kwargs["min_age_days"] == 14
+    footer = event.followup.send.await_args.kwargs["embed"].footer.text
+    assert "Last 7 days" in footer and "owned by Dvir" in footer
 
     event = stats_event()
     await command(bot, "stats", "storage")(event)
