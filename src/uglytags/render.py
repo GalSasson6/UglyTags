@@ -92,23 +92,75 @@ def delete_view(user_id: int) -> discord.ui.View:
     return view
 
 
-def reply_header(message: discord.Message) -> str:
-    snippet = discord.utils.escape_markdown(" ".join(message.content.split())[:100])
-    return t(
+def reply_embed(message: discord.Message) -> discord.Embed:
+    text = " ".join(message.content.split())
+    snippet = discord.utils.escape_markdown(text[:100])
+    if len(text) > 100:
+        snippet += "\u2026"
+    description = t(
         "recent.reply",
         link=message.jump_url,
-        author=message.author.mention,
         text=snippet or t("recent.reply_attachment"),
     )
+    if message.attachments or message.embeds:
+        description += " \U0001f4ce"
+    embed = discord.Embed(description=description)
+    embed.set_author(
+        name=t("recent.reply_author", name=message.author.global_name or message.author.name),
+        icon_url=str(message.author.display_avatar.url),
+    )
+    return embed
+
+
+def add_reply(prepared: Prepared, message: discord.Message) -> Prepared:
+    embed = reply_embed(message)
+    mention = message.author.mention
+    if isinstance(prepared.view, discord.ui.LayoutView):
+        card = discord.ui.Container(
+            discord.ui.Section(
+                f"**{discord.utils.escape_markdown(embed.author.name)}**\n{embed.description}",
+                accessory=discord.ui.Thumbnail(embed.author.icon_url),
+            )
+        )
+        items = prepared.view.to_components()
+        if kinds.count_components(items) + 5 > MAX_V2_COMPONENTS:
+            raise tagscript.TagError(t("error.reply_components"))
+        trash_row = next(
+            (
+                item
+                for item in prepared.view.children
+                if isinstance(item, discord.ui.ActionRow)
+                and any(isinstance(child, DeleteButton) for child in item.children)
+            ),
+            None,
+        )
+        if trash_row:
+            prepared.view.remove_item(trash_row)
+        prepared.view.add_item(discord.ui.TextDisplay(mention))
+        prepared.view.add_item(card)
+        if trash_row:
+            prepared.view.add_item(trash_row)
+    else:
+        if len(prepared.embeds) >= 10:
+            raise tagscript.TagError(t("error.reply_embeds"))
+        content = prepared.content or ""
+        prepared.content = "\n".join(
+            part for part in (content[: 2000 - len(mention) - 1], mention) if part
+        )
+        prepared.embeds = [*prepared.embeds, embed]
+    return prepared
 
 
 class ComponentSession:
-    def __init__(self, rt: tagscript.Runtime, result: tagscript.TagResult, editor):
+    def __init__(
+        self, rt: tagscript.Runtime, result: tagscript.TagResult, editor, reply_message=None
+    ):
         self.rt = rt
         self.result = result
         self.editor = editor
         self.executing = False
         self.view = None
+        self.reply_message = reply_message
 
     def build(self, content: str) -> discord.ui.View | discord.ui.LayoutView:
         try:
@@ -278,7 +330,9 @@ class ComponentSession:
                 raise tagscript.TagError(
                     "TagScript does not support pages inside of components currently"
                 )
-            prepared = prepare(self.rt, result, editor=self.editor)
+            prepared = prepare(
+                self.rt, result, editor=self.editor, reply_message=self.reply_message
+            )
             await self.editor(**prepared.edit_kwargs())
         except tagscript.TagError as error:
             await self.fail(str(error))
@@ -310,7 +364,10 @@ class ComponentSession:
                     self.result.limits,
                     self.result.files,
                 )
-                await self.editor(**prepare(self.rt, result, editor=self.editor).edit_kwargs())
+                prepared = prepare(
+                    self.rt, result, editor=self.editor, reply_message=self.reply_message
+                )
+                await self.editor(**prepared.edit_kwargs())
             elif isinstance(self.view, discord.ui.LayoutView):
                 self.disable()
                 await self.editor(view=self.view)
@@ -370,12 +427,15 @@ def page_files(result: tagscript.TagResult) -> list[list[tagscript.TagFile]]:
 
 
 class Paginator(discord.ui.View):
-    def __init__(self, result: tagscript.TagResult, owner_id: int, title: str = ""):
+    def __init__(
+        self, result: tagscript.TagResult, owner_id: int, title: str = "", reply_message=None
+    ):
         super().__init__(timeout=PAGE_TIMEOUT)
         self.pages = result.pages
         self.files = page_files(result)
         self.owner_id = owner_id
         self.title = title
+        self.reply_message = reply_message
         self.index = 0
         self.editor = None
         self.add_item(DeleteButton(owner_id, 1))
@@ -390,12 +450,15 @@ class Paginator(discord.ui.View):
     def kwargs(self) -> dict:
         page = self.pages[self.index]
         content = "\n".join(part for part in (self.title, page.get("content")) if part)
-        return {
-            "content": content[:2000] or None,
-            "embeds": page.get("embeds") or [],
-            "attachments": [to_discord_file(file) for file in self.files[self.index]],
-            "view": self,
-        }
+        prepared = Prepared(
+            content[:2000] or None,
+            page.get("embeds") or [],
+            self.files[self.index],
+            self,
+        )
+        if self.reply_message:
+            add_reply(prepared, self.reply_message)
+        return prepared.edit_kwargs()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if (interaction.data or {}).get("custom_id", "").startswith("uglytags:delete:"):
@@ -438,9 +501,17 @@ class Paginator(discord.ui.View):
                 log.debug("Could not remove paginator buttons")
 
 
-def prepare(rt: tagscript.Runtime, result: tagscript.TagResult, title: str = "", editor=None):
+def prepare(
+    rt: tagscript.Runtime,
+    result: tagscript.TagResult,
+    title: str = "",
+    editor=None,
+    reply_message: discord.Message | None = None,
+):
     if result.pages:
-        paginator = Paginator(result, rt.user.id, title)
+        paginator = Paginator(result, rt.user.id, title, reply_message)
+        if reply_message and any(len(page.get("embeds") or []) >= 10 for page in result.pages):
+            raise tagscript.TagError(t("error.reply_embeds"))
         paginator.editor = editor
         kwargs = paginator.kwargs()
         prepared = Prepared(kwargs["content"], kwargs["embeds"], paginator.files[0], paginator)
@@ -451,17 +522,17 @@ def prepare(rt: tagscript.Runtime, result: tagscript.TagResult, title: str = "",
     prepared = Prepared(files=result.files[:10])
     has_components = bool(result.components and result.components["components"])
     if has_components:
-        session = ComponentSession(rt, result, editor)
+        session = ComponentSession(rt, result, editor, reply_message)
         prepared.view = session.build(content)
     else:
         prepared.view = delete_view(rt.user.id)
     if isinstance(prepared.view, discord.ui.LayoutView):
-        return prepared
+        return add_reply(prepared, reply_message) if reply_message else prepared
     prepared.content = content[:2000] or None
     prepared.embeds = result.embeds[:10]
     if not (content or has_components or result.embeds or result.files):
         prepared.content = t("show.empty")
-    return prepared
+    return add_reply(prepared, reply_message) if reply_message else prepared
 
 
 async def send_result(
@@ -474,7 +545,7 @@ async def send_result(
 ):
     lead = [lead_embed] if lead_embed else []
     try:
-        prepared = prepare(rt, result, title, interaction.edit_original_response)
+        prepared = prepare(rt, result, title, interaction.edit_original_response, reply_message)
     except tagscript.TagError as error:
         await send_error(
             interaction, "\n\n".join(part for part in (title, str(error)) if part), lead

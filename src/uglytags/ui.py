@@ -233,8 +233,6 @@ async def execute(
 ):
     preview = lead_embed is not None
     lead = [lead_embed] if preview else []
-    if reply_message is not None:
-        title = render.reply_header(reply_message)
     if not interaction.response.is_done():
         await interaction.response.defer(ephemeral=preview, thinking=True)
     if not preview:

@@ -103,7 +103,16 @@ def reply_target():
     return SimpleNamespace(
         guild=SimpleNamespace(id=1),
         channel=SimpleNamespace(id=3),
-        author=SimpleNamespace(id=4, mention="<@4>", bot=False),
+        author=SimpleNamespace(
+            id=4,
+            mention="<@4>",
+            bot=False,
+            global_name="sour kraut",
+            name="sauerkraut",
+            display_avatar=SimpleNamespace(url="https://cdn.discordapp.com/avatars/4/avatar.png"),
+        ),
+        attachments=[],
+        embeds=[],
         content="Original message",
         jump_url="https://discord.com/channels/1/3/100",
     )
@@ -205,7 +214,8 @@ async def test_tag_reply_submission_posts_publicly_and_counts_usage(monkeypatch)
     event.response.defer.assert_awaited_once_with(ephemeral=False, thinking=True)
     bot.db.use.assert_awaited_once_with(row, 1, 2)
     output = event.edit_original_response.await_args.kwargs
-    assert "Reply to:" in output["content"] and "Tag output" in output["content"]
+    assert output["content"] == "Tag output\n<@4>"
+    assert "Reply to:" in output["embeds"][-1].description
     assert output["allowed_mentions"].to_dict()["users"] == [4]
     assert output["view"].children[0].user_id == 2
     await bot.close()

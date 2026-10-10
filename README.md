@@ -21,13 +21,17 @@ delete button is left out.
 - **Apps > tag reply**: right-click a message (or long-press on mobile)
   and choose this shortcut. A private form offers your 25 most recently used tags in
   this server, newest first, with optional arguments and one attachment. Submitting
-  posts the tag publicly with a small linked reply header and an author mention,
-  like CopyCat's reply shortcut. Only that author can be pinged; bots are not pinged.
+  posts the tag publicly, followed by an author mention and a compact reply card
+  with the original author's name, avatar, and linked message excerpt, like CopyCat's
+  reply shortcut. Messages are still sent as UglyTags, not as your profile.
+  Only that author can be pinged; bots are not pinged.
   The usual TagScript, usage counting, and trash can controls still apply. History
   uses the retained one-year use log, including tags run through aliases, groups,
   and nested tags; previews do not enter history. Deleted tags are left out, and
   renamed tags appear with their current names. Both you and the bot need permission
   to view the channel and send messages there.
+  The reply card stays on every pagination page and component update; tags that
+  leave no room for it report an error and can still be run with `/t`.
 - `/tag create name [content]`: creates a tag. Without `content`, a form opens with
   multi-line content and up to 10 file uploads. If the name is taken, nothing is
   overwritten: the bot asks whether to overwrite it (only offered to the tag's owner

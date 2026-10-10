@@ -264,18 +264,30 @@ async def test_lead_embed_joins_plain_output_and_follows_pages():
     ],
 )
 @pytest.mark.parametrize("bot_author", [False, True])
-async def test_recent_reply_header_and_ping_work_with_all_output_types(script, bot_author):
+async def test_recent_reply_card_and_ping_work_with_all_output_types(script, bot_author):
     target = SimpleNamespace(
         content="Original **message** <@8>",
         jump_url="https://discord.com/channels/1/2/3",
-        author=SimpleNamespace(id=4, mention="<@4>", bot=bot_author),
+        author=SimpleNamespace(
+            id=4,
+            mention="<@4>",
+            bot=bot_author,
+            global_name="sour kraut",
+            name="sauerkraut",
+            display_avatar=SimpleNamespace(url="https://cdn.discordapp.com/avatars/4/avatar.png"),
+        ),
+        attachments=[],
+        embeds=[],
     )
-    header = render.reply_header(target)
-    assert "**[Reply to:](https://discord.com/channels/1/2/3)** <@4>" in header
-    assert "\\*\\*message\\*\\*" in header
+    card = render.reply_embed(target)
+    assert card.description == (
+        "**[Reply to:](https://discord.com/channels/1/2/3)** Original \\*\\*message\\*\\* <@8>"
+    )
+    assert card.author.name == "sour kraut\u2004\u21a9\ufe0f"
+    assert card.author.icon_url == target.author.display_avatar.url
     event = SimpleNamespace(edit_original_response=AsyncMock())
     result = await result_of(script)
-    await render.send_result(event, runtime(), result, title=header, reply_message=target)
+    await render.send_result(event, runtime(), result, reply_message=target)
     kwargs = event.edit_original_response.await_args.kwargs
     mentions = kwargs["allowed_mentions"].to_dict()
     assert mentions.get("users", []) == ([] if bot_author else [4])
@@ -284,6 +296,104 @@ async def test_recent_reply_header_and_ping_work_with_all_output_types(script, b
     view = kwargs["view"]
     assert TRASH_ID in custom_ids(view.to_components())
     if isinstance(view, discord.ui.LayoutView):
-        assert header in view.to_components()[0]["content"]
+        payload = view.to_components()
+        assert payload[-3]["content"] == "<@4>"
+        assert payload[-2]["type"] == 17
+        section = payload[-2]["components"][0]
+        assert card.description in section["components"][0]["content"]
+        assert section["accessory"]["media"]["url"] == target.author.display_avatar.url
     else:
-        assert header in kwargs["content"]
+        assert kwargs["content"].endswith("\n<@4>")
+        assert "Reply to:" not in kwargs["content"]
+        assert kwargs["embeds"][-1].to_dict() == card.to_dict()
+        if isinstance(view, render.Paginator):
+            click = SimpleNamespace(response=SimpleNamespace(edit_message=AsyncMock()))
+            await view.go(click, 1)
+            updated = click.response.edit_message.await_args.kwargs
+            assert updated["content"] == "b\n<@4>"
+            assert updated["embeds"][-1].to_dict() == card.to_dict()
+
+
+async def test_reply_card_handles_attachment_only_and_truncated_messages():
+    target = SimpleNamespace(
+        content="",
+        jump_url="https://discord.com/channels/1/2/3",
+        author=SimpleNamespace(
+            global_name=None,
+            name="author",
+            display_avatar=SimpleNamespace(url="https://cdn.discordapp.com/avatars/4/avatar.png"),
+        ),
+        attachments=[object()],
+        embeds=[],
+    )
+    card = render.reply_embed(target)
+    assert card.author.name == "author\u2004\u21a9\ufe0f"
+    assert "(click to see attachment)" in card.description
+    assert card.description.endswith(" \U0001f4ce")
+    target.content = "x" * 101
+    assert "x" * 100 + "\u2026" in render.reply_embed(target).description
+
+
+@pytest.mark.parametrize("v2", [False, True])
+async def test_reply_card_survives_component_execution_and_timeout(v2):
+    target = SimpleNamespace(
+        content="i can change her",
+        jump_url="https://discord.com/channels/1/2/3",
+        author=SimpleNamespace(
+            id=4,
+            mention="<@4>",
+            global_name="sour kraut",
+            name="sauerkraut",
+            display_avatar=SimpleNamespace(url="https://cdn.discordapp.com/avatars/4/avatar.png"),
+        ),
+        attachments=[],
+        embeds=[],
+    )
+    button = {"type": 2, "label": "Update", "run": "changed"}
+    component = {"type": 17, "components": [{"type": 1, "components": [button]}]} if v2 else button
+    result = await result_of(f"initial{{componentjson:{json.dumps(component)}}}")
+    result.components["on_timeout"] = "timed out"
+    editor = AsyncMock()
+    prepared = render.prepare(runtime(), result, editor=editor, reply_message=target)
+    session = prepared.view.session
+    event = SimpleNamespace(
+        user=SimpleNamespace(id=7),
+        response=SimpleNamespace(edit_message=AsyncMock()),
+        edit_original_response=editor,
+    )
+    await session.run(event, "changed", None)
+    changed = editor.await_args.kwargs
+    assert changed["content"] == "changed\n<@4>"
+    assert changed["embeds"][-1].description == (
+        "**[Reply to:](https://discord.com/channels/1/2/3)** i can change her"
+    )
+    await session.timeout()
+    assert editor.await_args.kwargs["content"] == "timed out\n<@4>"
+    assert editor.await_args.kwargs["embeds"][-1].author.name.startswith("sour kraut")
+
+
+async def test_reply_card_reports_capacity_errors_instead_of_dropping_output():
+    target = SimpleNamespace(
+        content="text",
+        jump_url="https://discord.com/channels/1/2/3",
+        author=SimpleNamespace(
+            mention="<@4>",
+            global_name=None,
+            name="author",
+            display_avatar=SimpleNamespace(url="https://cdn.discordapp.com/avatars/4/avatar.png"),
+        ),
+        attachments=[],
+        embeds=[],
+    )
+    result = await result_of('{embedjson:{"title":"tag"}}' * 10)
+    with pytest.raises(tagscript.TagError, match="all 10 embed slots"):
+        render.prepare(runtime(), result, reply_message=target)
+    assert len(result.embeds) == 10
+    result = await result_of('{pagejson:[{"content":"page"}]}')
+    result.pages[0]["embeds"] = [discord.Embed(title="tag")] * 10
+    with pytest.raises(tagscript.TagError, match="all 10 embed slots"):
+        render.prepare(runtime(), result, reply_message=target)
+    component = json.dumps({"type": 10, "content": "text"})
+    result = await result_of(f"{{componentjson:{component}}}" * 34)
+    with pytest.raises(tagscript.TagError, match="too many components"):
+        render.prepare(runtime(), result, reply_message=target)
