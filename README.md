@@ -142,7 +142,8 @@ Supported:
   (and forms), `messagecontent`, `messageuserid`, `messagelastid`, `randmessageid`,
   `json.user`, `json.member`, `json.memberoruser`, `json.channel`, `json.guild`,
   `json.message`, `unix`, `unixs`, `unixsnowflake`, `markuptime`, `prefix` (always
-  `/`), `nsfw` (fails outside age-restricted channels).
+  `/`), `nsfw` (an opt-in lock: the tag fails outside age-restricted channels),
+  `nsfwfilter` (outputs its text unfiltered, up to 2,000 characters).
 - Tags: `tag` (by tag ID, same server only), `tagname`, `tagid`, `tagcontent`,
   `tagownerid`, `ismaintag`, `isfromcomponent`, `isfromai` (always `false`),
   `settings`.
@@ -166,11 +167,12 @@ Components expire after 60 seconds, then run `{componentsontimeout}` if set.
 
 Not supported, and reported as an error when used: NotSoBot API features
 (`ai`, `imagine`, `edit`, `iscript`/`mediascript`, `ocr`, `identify`, `transcribe`,
-`translate`, `nsfwfilter`, image and YouTube search, weather, locations, and
+`translate`, image and YouTube search, weather, locations, and
 reminders), general web requests (`request`, `text`/`download`,
 `textfromhtml`), `attachvoice`, and global storage (`getglobal`, `setglobal`,
 `variablesglobal`). Code-language blocks are not run. Unknown functions are left as
-text, as in NotSoBot.
+text, as in NotSoBot. NotSoBot's output filter (which replaces flagged or very long
+output with "i love cats") is not ported; tag output is never censored.
 
 Slash commands have no source or replied-to message, so `replycontent`,
 `replyuserid`, `json.messagereply`, and argument-less `messagecontent`,

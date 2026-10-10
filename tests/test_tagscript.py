@@ -296,6 +296,11 @@ async def test_nsfw_requires_age_restricted_channel():
     assert await run("{nsfw}ok", rt=rt) == "ok"
 
 
+async def test_nsfwfilter_passes_text_through():
+    assert await run("{nsfwfilter:anything goes}") == "anything goes"
+    assert await run("{nsfwfilter:" + "x" * 2500 + "}") == "x" * 2000
+
+
 async def test_attachment_option_feeds_media_functions():
     rt = runtime(attachment_url="https://cdn.discordapp.com/attachments/1/2/a.png")
     assert await run("{image}", rt=rt) == rt.attachment_url

@@ -142,7 +142,6 @@ UNSUPPORTED = {
     "editurl",
     "imagine",
     "imagineurl",
-    "nsfwfilter",
     "request",
     "translate",
     "download",
@@ -1202,6 +1201,12 @@ async def nsfw(rt, arg, tag):
     is_nsfw = getattr(rt.channel, "is_nsfw", None)
     if not (is_nsfw and is_nsfw()):
         raise TagError("Cannot use a NSFW tag here!")
+    return True
+
+
+@function("nsfwfilter")
+async def nsfw_filter(rt, arg, tag):
+    tag.text += arg[:2000]
     return True
 
 
