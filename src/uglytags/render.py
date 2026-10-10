@@ -114,7 +114,7 @@ def reply_embed(message: discord.Message) -> discord.Embed:
 
 def add_reply(prepared: Prepared, message: discord.Message) -> Prepared:
     embed = reply_embed(message)
-    mention = message.author.mention
+    mention = t("recent.reply_mention", author=message.author.mention)
     if isinstance(prepared.view, discord.ui.LayoutView):
         card = discord.ui.Container(
             discord.ui.Section(

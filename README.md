@@ -19,9 +19,10 @@ delete button is left out.
   not allow `/tag` to take a tag name because it has subcommands, so showing a tag
   uses NotSoBot's `t` alias.
 - **Apps > tag reply**: right-click a message (or long-press on mobile)
-  and choose this shortcut. A private form offers your 25 most recently used tags in
+  and choose this shortcut (prefixed with a speech-bubble icon). A private form offers your 25 most recently used tags in
   this server, newest first, with optional arguments and one attachment. Submitting
-  posts the tag publicly, followed by an author mention and a compact reply card
+  posts the tag publicly, followed by an author mention on a smaller subtext line
+  beneath the content and a compact reply card
   with the original author's name, avatar, and linked message excerpt, like CopyCat's
   reply shortcut. Messages are still sent as UglyTags, not as your profile.
   Only that author can be pinged; bots are not pinged.

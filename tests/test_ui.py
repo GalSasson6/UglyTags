@@ -68,8 +68,12 @@ def command(bot, *path):
 
 async def test_commands_and_intents():
     bot = UglyTags("postgresql://localhost/test")
-    assert {command.name for command in bot.tree.get_commands()} == {"t", "tag", "tag reply"}
-    shortcut = bot.tree.get_command("tag reply", type=discord.AppCommandType.message)
+    assert {command.name for command in bot.tree.get_commands()} == {
+        "t",
+        "tag",
+        "\U0001f4ac tag reply",
+    }
+    shortcut = bot.tree.get_command("\U0001f4ac tag reply", type=discord.AppCommandType.message)
     assert shortcut.guild_only
     assert shortcut.type == discord.AppCommandType.message
     show = bot.tree.get_command("t")
@@ -122,7 +126,7 @@ async def test_tag_reply_opens_private_recent_picker(monkeypatch):
     bot = stats_bot(recent_tags=AsyncMock(return_value=[tag(), tag(id=11, name="second")]))
     monkeypatch.setattr(ui, "can_send_tag", lambda event: True)
     event = interaction()
-    shortcut = bot.tree.get_command("tag reply", type=discord.AppCommandType.message)
+    shortcut = bot.tree.get_command("\U0001f4ac tag reply", type=discord.AppCommandType.message)
     await shortcut.callback(event, reply_target())
     bot.db.recent_tags.assert_awaited_once_with(1, 2)
     modal = event.response.send_modal.await_args.args[0]
@@ -214,7 +218,7 @@ async def test_tag_reply_submission_posts_publicly_and_counts_usage(monkeypatch)
     event.response.defer.assert_awaited_once_with(ephemeral=False, thinking=True)
     bot.db.use.assert_awaited_once_with(row, 1, 2)
     output = event.edit_original_response.await_args.kwargs
-    assert output["content"] == "Tag output\n<@4>"
+    assert output["content"] == "Tag output\n-# <@4>"
     assert "Reply to:" in output["embeds"][-1].description
     assert output["allowed_mentions"].to_dict()["users"] == [4]
     assert output["view"].children[0].user_id == 2

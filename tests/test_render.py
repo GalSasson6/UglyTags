@@ -297,20 +297,20 @@ async def test_recent_reply_card_and_ping_work_with_all_output_types(script, bot
     assert TRASH_ID in custom_ids(view.to_components())
     if isinstance(view, discord.ui.LayoutView):
         payload = view.to_components()
-        assert payload[-3]["content"] == "<@4>"
+        assert payload[-3]["content"] == "-# <@4>"
         assert payload[-2]["type"] == 17
         section = payload[-2]["components"][0]
         assert card.description in section["components"][0]["content"]
         assert section["accessory"]["media"]["url"] == target.author.display_avatar.url
     else:
-        assert kwargs["content"].endswith("\n<@4>")
+        assert kwargs["content"].endswith("\n-# <@4>")
         assert "Reply to:" not in kwargs["content"]
         assert kwargs["embeds"][-1].to_dict() == card.to_dict()
         if isinstance(view, render.Paginator):
             click = SimpleNamespace(response=SimpleNamespace(edit_message=AsyncMock()))
             await view.go(click, 1)
             updated = click.response.edit_message.await_args.kwargs
-            assert updated["content"] == "b\n<@4>"
+            assert updated["content"] == "b\n-# <@4>"
             assert updated["embeds"][-1].to_dict() == card.to_dict()
 
 
@@ -363,12 +363,12 @@ async def test_reply_card_survives_component_execution_and_timeout(v2):
     )
     await session.run(event, "changed", None)
     changed = editor.await_args.kwargs
-    assert changed["content"] == "changed\n<@4>"
+    assert changed["content"] == "changed\n-# <@4>"
     assert changed["embeds"][-1].description == (
         "**[Reply to:](https://discord.com/channels/1/2/3)** i can change her"
     )
     await session.timeout()
-    assert editor.await_args.kwargs["content"] == "timed out\n<@4>"
+    assert editor.await_args.kwargs["content"] == "timed out\n-# <@4>"
     assert editor.await_args.kwargs["embeds"][-1].author.name.startswith("sour kraut")
 
 
