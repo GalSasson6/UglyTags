@@ -30,7 +30,6 @@ class Prepared:
     embeds: list = field(default_factory=list)
     files: list = field(default_factory=list)
     view: discord.ui.View | discord.ui.LayoutView | None = None
-    followup: bool = False
 
     def edit_kwargs(self) -> dict:
         return {
@@ -551,32 +550,6 @@ def prepare(
         content = f"{title}\n\n{content}"[:4000].strip()
     prepared = Prepared(files=result.files[:10])
     has_components = bool(result.components and result.components["components"])
-    if reply_message and prepared.files and not (has_components or result.embeds):
-        prepared.view = discord.ui.LayoutView(timeout=None)
-        if content:
-            prepared.view.add_item(discord.ui.TextDisplay(content))
-        for file in prepared.files:
-            filename = (
-                f"SPOILER_{file.filename}"
-                if file.spoiler and not file.filename.startswith("SPOILER_")
-                else file.filename
-            )
-            attachment = f"attachment://{filename}"
-            if tagscript.media_kind(file.filename, None) in ("image", "video"):
-                prepared.view.add_item(
-                    discord.ui.MediaGallery(
-                        discord.MediaGalleryItem(
-                            attachment,
-                            description=file.description,
-                            spoiler=file.spoiler,
-                        )
-                    )
-                )
-            else:
-                prepared.view.add_item(discord.ui.File(attachment, spoiler=file.spoiler))
-        prepared.view.add_item(discord.ui.ActionRow(DeleteButton(rt.user.id)))
-        prepared.followup = True
-        return add_reply(prepared, reply_message)
     if has_components:
         session = ComponentSession(rt, result, editor, reply_message)
         prepared.view = session.build(content)
@@ -619,15 +592,7 @@ async def send_result(
                 users=[reply_message.author] if not reply_message.author.bot else False,
                 replied_user=False,
             )
-        if prepared.followup:
-            files = kwargs.pop("attachments")
-            await interaction.followup.send(**kwargs, files=files, wait=True)
-            try:
-                await interaction.delete_original_response()
-            except discord.HTTPException:
-                log.debug("Could not remove deferred tag response")
-        else:
-            await interaction.edit_original_response(**kwargs)
+        await interaction.edit_original_response(**kwargs)
     except discord.HTTPException as error:
         log.warning("Tag response failed: %s", error)
         if prepared.view:
