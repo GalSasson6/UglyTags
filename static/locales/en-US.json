@@ -177,5 +177,6 @@
   "prune.scope": "(Tags {criteria})",
   "prune.none": "No tags match. {scope}",
   "prune.more": " and {count} more",
-  "error.prune_criteria": "Choose at least one of unused_days, least_used, or max_uses."
+  "error.prune_criteria": "Choose at least one of unused_days, least_used, or max_uses.",
+  "stats.list_user_title": "{sort} tags owned by {user}"
 }

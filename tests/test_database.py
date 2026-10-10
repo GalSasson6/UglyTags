@@ -259,6 +259,7 @@ async def test_use_log_stats_and_ranking(db):
     assert [row["name"] for row in await db.ranking(1, "most", None)][0] == "hello"
     assert [row["name"] for row in await db.ranking(1, "least", None)][0] == "quiet"
     assert (await db.ranking(1, "recent", None))[-1]["last_used_at"] is None
+    assert [row["name"] for row in await db.ranking(1, "most", None, 8)] == ["quiet"]
 
     await db.execute("UPDATE tag_uses SET used_at = now() - INTERVAL '2 years' WHERE user_id = 100")
     assert await db.cleanup_uses() == 3

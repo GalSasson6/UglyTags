@@ -557,7 +557,15 @@ async def test_stats_commands_render():
     embed = event.followup.send.await_args.kwargs["embed"]
     assert embed.title == "Least used tags in Server"
     assert embed.description.startswith("1. `hello`: 9 uses, last used never")
-    assert bot.db.ranking.await_args.args[1:] == ("least", None)
+    assert bot.db.ranking.await_args.args[1:] == ("least", None, None)
+
+    event = stats_event()
+    owner = SimpleNamespace(id=5, display_name="Dvir")
+    await command(bot, "stats", "list")(event, "most", 7, owner)
+    embed = event.followup.send.await_args.kwargs["embed"]
+    assert embed.title == "Most used tags owned by Dvir"
+    assert bot.db.ranking.await_args.args[1] == "most"
+    assert bot.db.ranking.await_args.args[3] == 5
 
     event = stats_event()
     await command(bot, "stats", "storage")(event)

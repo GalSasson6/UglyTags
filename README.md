@@ -58,8 +58,9 @@ delete button is left out.
   use, creation, owner, storage, and top members.
 - `/tag stats user [user] [period]`: a member's tag count, uses of their tags, tags
   they ran, storage, and the tags they ran most.
-- `/tag stats list sort [period]`: a paged ranking of every tag by most used, least
-  used, recently used, longest unused, newest, or oldest.
+- `/tag stats list sort [period] [user]`: a paged ranking of every tag, or only the
+  tags a member owns, by most used, least used, recently used, longest unused,
+  newest, or oldest.
 - `/tag stats storage`: the server's storage use (files, tag text, and stored
   variables), the largest tags, and the members using the most storage. Sizes use
   1 MB = 1,000,000 bytes.

@@ -314,7 +314,9 @@ class Database:
             "storage": storage["total"],
         }
 
-    async def ranking(self, guild_id: int, sort: str, since: datetime | None) -> list[dict]:
+    async def ranking(
+        self, guild_id: int, sort: str, since: datetime | None, owner_id: int | None = None
+    ) -> list[dict]:
         count = "COALESCE(p.uses, 0)" if since else "t.uses"
         order = {
             "most": f"{count} DESC, lower(t.name)",
@@ -330,8 +332,9 @@ class Database:
                     SELECT tag_id, count(*) AS uses FROM tag_uses
                     WHERE guild_id = %s AND used_at >= %s GROUP BY tag_id
                 ) p ON p.tag_id = t.id
-                WHERE t.guild_id = %s ORDER BY {order}""",
-            (guild_id, since or EPOCH, guild_id),
+                WHERE t.guild_id = %s AND (%s::bigint IS NULL OR t.owner_id = %s)
+                ORDER BY {order}""",
+            (guild_id, since or EPOCH, guild_id, owner_id, owner_id),
         )
 
     async def prune_candidates(

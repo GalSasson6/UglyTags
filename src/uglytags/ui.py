@@ -1113,16 +1113,23 @@ def register_commands(bot):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     @stats_group.command(name="list", description=t("command.stats_list"))
-    @app_commands.describe(sort=t("option.sort"), period=t("option.period"))
+    @app_commands.describe(
+        sort=t("option.sort"), period=t("option.period"), user=t("option.filter_user")
+    )
     @app_commands.choices(
         sort=[app_commands.Choice(name=t(f"sort.{key}"), value=key) for key in SORTS],
         period=periods,
     )
-    async def stats_list(interaction: discord.Interaction, sort: str, period: int = 0):
+    async def stats_list(
+        interaction: discord.Interaction,
+        sort: str,
+        period: int = 0,
+        user: discord.User | None = None,
+    ):
         await interaction.response.defer(ephemeral=True, thinking=True)
-        rows = await bot.db.ranking(interaction.guild_id, sort, since(period))
+        rows = await bot.db.ranking(interaction.guild_id, sort, since(period), user and user.id)
         if not rows:
-            await reply(interaction, t("error.no_tags"))
+            await reply(interaction, t("error.no_matching_tags" if user else "error.no_tags"))
             return
         lines = [
             t(
@@ -1135,6 +1142,8 @@ def register_commands(bot):
             for row in rows
         ]
         title = t("stats.list_title", sort=t(f"sort.{sort}"), guild=interaction.guild.name)
+        if user:
+            title = t("stats.list_user_title", sort=t(f"sort.{sort}"), user=user.display_name)
         view = ListView(interaction.user.id, title, lines, period_label(period))
         await interaction.followup.send(
             embed=view.embed(),
