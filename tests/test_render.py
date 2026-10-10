@@ -234,3 +234,22 @@ async def test_pages_attach_referenced_files():
     assert await prepared.view.interaction_check(stranger)
     stranger.data = {"custom_id": "next"}
     assert not await prepared.view.interaction_check(stranger)
+
+
+async def test_lead_embed_joins_plain_output_and_follows_pages():
+    lead = discord.Embed(title="info")
+    event = SimpleNamespace(
+        user=SimpleNamespace(id=7),
+        edit_original_response=AsyncMock(),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+    result = await result_of('text{embedjson:{"title":"tag"}}')
+    await render.send_result(event, runtime(), result, lead_embed=lead)
+    embeds = event.edit_original_response.await_args.kwargs["embeds"]
+    assert [embed.title for embed in embeds] == ["info", "tag"]
+    event.followup.send.assert_not_awaited()
+
+    result = await result_of('{pagejson:[{"content":"a"},{"content":"b"}]}')
+    await render.send_result(event, runtime(), result, lead_embed=lead)
+    assert event.edit_original_response.await_args.kwargs["embeds"] == []
+    assert event.followup.send.await_args.kwargs["embed"] is lead

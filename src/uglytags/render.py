@@ -454,12 +454,20 @@ def prepare(rt: tagscript.Runtime, result: tagscript.TagResult, title: str = "",
     return prepared
 
 
-async def send_result(interaction: discord.Interaction, rt, result, title: str = ""):
+async def send_result(
+    interaction: discord.Interaction, rt, result, title: str = "", lead_embed=None
+):
+    lead = [lead_embed] if lead_embed else []
     try:
         prepared = prepare(rt, result, title, interaction.edit_original_response)
     except tagscript.TagError as error:
-        await send_error(interaction, "\n\n".join(part for part in (title, str(error)) if part))
+        await send_error(
+            interaction, "\n\n".join(part for part in (title, str(error)) if part), lead
+        )
         return
+    separate_lead = bool(lead) and isinstance(prepared.view, discord.ui.LayoutView | Paginator)
+    if lead and not separate_lead:
+        prepared.embeds = lead + prepared.embeds[:9]
     try:
         await interaction.edit_original_response(**prepared.edit_kwargs())
     except discord.HTTPException as error:
@@ -470,13 +478,16 @@ async def send_result(interaction: discord.Interaction, rt, result, title: str =
             message = t("error.too_large")
         else:
             message = t("error.send", error=error.text or error.status)
-        await send_error(interaction, message)
+        await send_error(interaction, message, lead)
+        return
+    if separate_lead:
+        await interaction.followup.send(embed=lead_embed, ephemeral=True)
 
 
-async def send_error(interaction: discord.Interaction, message: str):
+async def send_error(interaction: discord.Interaction, message: str, embeds=()):
     await interaction.edit_original_response(
         content=message[:2000],
-        embeds=[],
+        embeds=list(embeds),
         attachments=[],
         view=delete_view(interaction.user.id),
     )

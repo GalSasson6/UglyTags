@@ -240,6 +240,11 @@ class Runtime:
     attachment_url: str | None = None
     max_file_size: int = 10 * 1024 * 1024
     cache: dict = field(default_factory=dict)
+    preview: bool = False
+
+    async def use(self, tag: dict):
+        if not self.preview:
+            await self.db.use(tag, self.guild.id, self.user.id)
 
     @property
     def db(self):
@@ -1649,7 +1654,7 @@ def storage_set(scope: str):
                 f"{tag.limits.storage_value_length} characters"
             )
         tag_id = storage_tag_id(rt)
-        if tag_id:
+        if tag_id and not rt.preview:
             try:
                 await rt.db.set_variable(tag_id, scope, storage_id(rt, scope), key, value)
             except StorageLimitError as error:
@@ -1666,7 +1671,7 @@ def storage_delete(scope: str):
         key = arg.strip()
         check_storage_key(key, tag)
         tag_id = storage_tag_id(rt)
-        if tag_id:
+        if tag_id and not rt.preview:
             await rt.db.delete_variable(tag_id, scope, storage_id(rt, scope), key)
         return True
 
@@ -2096,12 +2101,12 @@ async def tag_function(rt, arg, tag):
     fetched = await rt.db.get_tag_by_id(int(tag_id))
     if not fetched or not rt.guild or fetched["guild_id"] != rt.guild.id:
         raise TagError("Cannot call this tag")
-    await rt.db.use(fetched, rt.guild.id, rt.user.id)
+    await rt.use(fetched)
     if is_group(fetched):
         fetched = await rt.db.random_member(target_id(fetched))
         if fetched is None:
             raise TagError("This group has no tags")
-        await rt.db.use(fetched, rt.guild.id, rt.user.id)
+        await rt.use(fetched)
     old_tag = rt.tag
     old_variables = dict(tag.variables)
     same = bool(old_tag) and old_tag["id"] == fetched["id"]

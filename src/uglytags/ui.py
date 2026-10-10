@@ -163,19 +163,31 @@ async def save_tag(
 
 
 async def execute(
-    bot, interaction: discord.Interaction, tag: dict, arguments: str, attachment, title=""
+    bot,
+    interaction: discord.Interaction,
+    tag: dict,
+    arguments: str,
+    attachment,
+    title="",
+    lead_embed=None,
 ):
+    preview = lead_embed is not None
+    lead = [lead_embed] if preview else []
     if not interaction.response.is_done():
-        await interaction.response.defer(thinking=True)
-    await bot.db.use(tag, interaction.guild_id, interaction.user.id)
+        await interaction.response.defer(ephemeral=preview, thinking=True)
+    if not preview:
+        await bot.db.use(tag, interaction.guild_id, interaction.user.id)
     if is_group(tag):
         tag = await bot.db.random_member(target_id(tag))
         if tag is None:
             await render.send_error(
-                interaction, "\n\n".join(part for part in (title, t("error.group_empty")) if part)
+                interaction,
+                "\n\n".join(part for part in (title, t("error.group_empty")) if part),
+                lead,
             )
             return
-        await bot.db.use(tag, interaction.guild_id, interaction.user.id)
+        if not preview:
+            await bot.db.use(tag, interaction.guild_id, interaction.user.id)
     rt = tagscript.Runtime(
         client=bot,
         guild=interaction.guild,
@@ -184,15 +196,16 @@ async def execute(
         tag=tag,
         attachment_url=attachment.url if attachment else None,
         max_file_size=interaction.filesize_limit,
+        preview=preview,
     )
     try:
         result = await tagscript.parse(rt, tag_content(tag), arguments)
     except tagscript.TagError as error:
         await render.send_error(
-            interaction, "\n\n".join(part for part in (title, str(error)) if part)
+            interaction, "\n\n".join(part for part in (title, str(error)) if part), lead
         )
         return
-    await render.send_result(interaction, rt, result, title)
+    await render.send_result(interaction, rt, result, title, lead_embed)
 
 
 def info_embed(
@@ -652,16 +665,24 @@ def register_commands(bot):
         await reply(interaction, t("result.renamed", old=code(current["name"]), new=code(name)))
 
     @group.command(name="info", description=t("command.info"))
-    @app_commands.describe(name=t("option.name"))
+    @app_commands.describe(
+        name=t("option.name"), arguments=t("option.arguments"), attachment=t("option.attachment")
+    )
     @app_commands.autocomplete(name=all_tags)
-    async def info(interaction: discord.Interaction, name: str):
+    async def info(
+        interaction: discord.Interaction,
+        name: str,
+        arguments: str | None = None,
+        attachment: discord.Attachment | None = None,
+    ):
         tag = await find(interaction, name)
-        if tag:
-            names = await bot.db.file_names(tag["reference_id"] or tag["id"])
-            members = await bot.db.group_members(tag["id"]) if tag["is_group"] else None
-            await interaction.response.send_message(
-                embed=info_embed(tag, names, members), ephemeral=True
-            )
+        if tag is None:
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        names = await bot.db.file_names(tag["reference_id"] or tag["id"])
+        members = await bot.db.group_members(tag["id"]) if tag["is_group"] else None
+        embed = info_embed(tag, names, members)
+        await execute(bot, interaction, tag, arguments or "", attachment, lead_embed=embed)
 
     group_group = app_commands.Group(name="group", description=t("command.group"), parent=group)
 

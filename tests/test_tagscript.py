@@ -304,3 +304,14 @@ async def test_attachment_option_feeds_media_functions():
     assert await run("{image:<:smile:123456789012345678>}", rt=rt) == (
         "https://cdn.discordapp.com/emojis/123456789012345678.png"
     )
+
+
+async def test_preview_does_not_write_storage_or_count_nested_uses():
+    child = make_tag(333333333333333333, "child", name="child")
+    db = FakeDB([child])
+    rt = runtime(db, preview=True)
+    assert await run("{setserver:a|1}{getserver:a|unset}{tag:333333333333333333}", rt=rt) == (
+        "unsetchild"
+    )
+    assert db.storage == {}
+    db.use.assert_not_awaited()

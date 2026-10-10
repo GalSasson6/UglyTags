@@ -565,3 +565,25 @@ async def test_stats_commands_render():
     assert "**Total**: 3.00 KB" in embed.description
     assert "<@9>: 3.00 KB" in embed.fields[1].value
     await bot.close()
+
+
+async def test_info_previews_privately_without_counting_a_use():
+    bot = UglyTags("postgresql://localhost/test")
+    shown = tag(name="bacon", content="crispy {args}")
+    bot.db = SimpleNamespace(
+        get_tag=AsyncMock(return_value=shown),
+        file_names=AsyncMock(return_value=["a.mp4"]),
+        use=AsyncMock(),
+        close=AsyncMock(),
+    )
+    event = interaction()
+    event.guild, event.channel, event.filesize_limit = None, None, 10_000_000
+    event.edit_original_response = AsyncMock()
+    await command(bot, "info")(event, "bacon", "strips", None)
+    assert event.response.defer.await_args.kwargs["ephemeral"]
+    bot.db.use.assert_not_awaited()
+    sent = event.edit_original_response.await_args.kwargs
+    assert sent["content"] == "crispy strips"
+    assert sent["embeds"][0].title == "bacon"
+    assert "`a.mp4`" in sent["embeds"][0].fields[0].value
+    await bot.close()

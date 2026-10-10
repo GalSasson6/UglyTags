@@ -5,7 +5,7 @@
   "command.edit": "Edit one of your tags",
   "command.alias": "Create a tag alias",
   "command.rename": "Rename one of your tags",
-  "command.info": "View a tag's information and raw content",
+  "command.info": "Preview a tag privately, with its raw content, owner, uses, and files",
   "command.random": "Show a random tag",
   "command.list": "List tags",
   "command.list_server": "List the server's tags",

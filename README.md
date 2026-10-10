@@ -29,7 +29,10 @@ delete button is left out.
 - `/tag alias tag name`: creates or repoints an alias that runs another tag.
 - `/tag rename tag name`: renames a tag. Owners can rename their own tags; server
   administrators can rename any tag.
-- `/tag info name`: shows raw content, owner, ID, uses, dates, and stored files.
+- `/tag info name [arguments] [attachment]`: privately previews the tag's output
+  together with its raw content, owner, ID, uses, dates, and stored files. A preview
+  does not count as a use and does not save persistent variables; a group previews
+  one of its tags.
 - `/tag random [arguments] [content] [name] [user] [attachment]`: runs a random
   matching tag.
 - `/tag list server [content] [name] [user]` and `/tag list user [user] [content] [name]`:
