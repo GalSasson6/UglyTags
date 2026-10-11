@@ -585,3 +585,41 @@ async def send_error(interaction: discord.Interaction, message: str, embeds=()):
         attachments=[],
         view=delete_view(interaction.user.id),
     )
+
+
+async def send_message_result(message: discord.Message, rt, result, title: str = ""):
+    sent = None
+
+    async def edit(**kwargs):
+        await sent.edit(**kwargs)
+
+    try:
+        prepared = prepare(rt, result, title, edit)
+    except tagscript.TagError as error:
+        await send_message_error(message, "\n\n".join(part for part in (title, str(error)) if part))
+        return
+    try:
+        sent = await message.reply(
+            **prepared.edit_kwargs(),
+            mention_author=False,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+    except discord.HTTPException as error:
+        log.warning("Tag response failed: %s", error)
+        if prepared.view:
+            prepared.view.stop()
+        error_message = (
+            t("error.too_large")
+            if error.status == 413
+            else t("error.send", error=error.text or error.status)
+        )
+        await send_message_error(message, error_message)
+
+
+async def send_message_error(message: discord.Message, content: str):
+    await message.reply(
+        content[:2000],
+        view=delete_view(message.author.id),
+        mention_author=False,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )

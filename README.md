@@ -6,10 +6,11 @@ PostgreSQL. Licensed under MIT.
 
 ## Commands
 
-Commands work in servers only, using slash commands and a message Apps shortcut. Tags belong to the server
-they were created in. Tag names are 1-100 characters and are matched
-case-insensitively. Management replies are private; `/t` and `/tag random` post
-publicly. Every public tag message has a red trash can button that deletes it; the
+Commands work in servers only, using slash commands, `.t` chat commands, and a message Apps shortcut.
+Tags belong to the server they were created in. Tag names are 1-100 characters and are matched
+case-insensitively. Slash management replies are private; chat management replies and
+tags run with `/t`, `/tag random`, or `.t` post publicly. Every public tag message has
+a red trash can button that deletes it; the
 person who ran the command and server administrators can use it, and it keeps
 working after the bot restarts. If a tag's own components fill every button slot, the
 delete button is left out.
@@ -18,6 +19,13 @@ delete button is left out.
   `attachment` is used by `{image}`, `{media}`, and similar functions. Discord does
   not allow `/tag` to take a tag name because it has subcommands, so showing a tag
   uses NotSoBot's `t` alias.
+- `.t name [arguments]` and `.tag name [arguments]`: run a tag from chat. Quote names
+  containing spaces. The original `.t show`/`.tag show` aliases also work.
+- `.t create`, `.t edit`, `.t alias`, `.t rename`, `.t info`, `.t list`, `.t random`,
+  and `.t remove`: provide the original bot's core chat management commands. `.t add`,
+  `.t owner`, and `.t raw` remain aliases. Create and edit store files attached to the
+  command message. Use the slash commands for forms, filters, imports, exports, groups,
+  statistics, and pruning.
 - **Apps > tag reply**: right-click a message (or long-press on mobile)
   and choose this shortcut (prefixed with a speech-bubble icon). A private form offers your 25 most recently used tags in
   this server, newest first, with optional arguments and one attachment. Submitting

@@ -16,7 +16,7 @@ from uglytags.media import (
 )
 from uglytags.render import DeleteButton
 from uglytags.transfer import ImportLimits
-from uglytags.ui import register_commands, report_error
+from uglytags.ui import handle_prefix_message, register_commands, report_error
 
 log = logging.getLogger(__name__)
 
@@ -66,6 +66,17 @@ class UglyTags(discord.Client):
 
     async def on_ready(self):
         log.info("UglyTags connected to %s servers", len(self.guilds))
+
+    async def on_message(self, message: discord.Message):
+        try:
+            await handle_prefix_message(self, message)
+        except Exception:
+            log.exception("Prefix command failed")
+            await message.reply(
+                t("error.generic"),
+                mention_author=False,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
 
     @tasks.loop(hours=1)
     async def cleanup(self):

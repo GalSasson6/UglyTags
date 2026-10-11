@@ -2,6 +2,8 @@
   "command.tag": "Custom server tags",
   "command.show": "Show a tag",
   "command.recent_tags": "\ud83d\udcac Tag reply",
+  "prefix.usage": "Usage: `{usage}`",
+  "prefix.user_not_found": "Unable to find that user.",
   "recent.title": "tag reply",
   "recent.tag": "Your recently used tags (newest first)",
   "recent.empty": "You have not used any tags in this server in the retained use history. Run a tag with /t first.",

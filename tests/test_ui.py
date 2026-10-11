@@ -59,6 +59,29 @@ def interaction(user_id=2, **permissions):
     )
 
 
+def prefix_message(content, user_id=2, attachments=None, **permissions):
+    author = SimpleNamespace(
+        id=user_id,
+        bot=False,
+        display_name=f"User {user_id}",
+        guild_permissions=discord.Permissions(**permissions),
+    )
+    guild = SimpleNamespace(
+        id=1,
+        filesize_limit=20_000_000,
+        get_member=lambda member_id: author if member_id == user_id else None,
+        get_member_named=lambda name: author if name == author.display_name else None,
+    )
+    return SimpleNamespace(
+        content=content,
+        author=author,
+        guild=guild,
+        channel=SimpleNamespace(),
+        attachments=attachments or [],
+        reply=AsyncMock(return_value=AsyncMock()),
+    )
+
+
 def command(bot, *path):
     group = bot.tree.get_command("tag")
     for name in path:
@@ -100,6 +123,102 @@ async def test_commands_and_intents():
     payload = group.to_dict(bot.tree)
     for option in payload["options"]:
         assert len(option["description"]) <= 100
+    await bot.close()
+
+
+@pytest.mark.parametrize(
+    ("value", "consume", "expected"),
+    [
+        ('"two words" remaining text', False, ("two words", "remaining text")),
+        ("one remaining text", False, ("one", "remaining text")),
+        ('"two words"', True, ("two words", "")),
+        ("two words", True, ("two words", "")),
+        ('"unterminated', False, None),
+    ],
+)
+def test_prefix_argument_parsing(value, consume, expected):
+    assert ui.prefix_argument(value, consume=consume) == expected
+
+
+async def test_prefix_show_and_original_aliases(monkeypatch):
+    row = tag(name="two words")
+    bot = stats_bot(get_tag=AsyncMock(return_value=row))
+    execute = AsyncMock()
+    monkeypatch.setattr(ui, "execute_message", execute)
+
+    message = prefix_message('.t "two words" first second')
+    assert await ui.handle_prefix_message(bot, message)
+    execute.assert_awaited_once_with(bot, message, row, "first second", None)
+
+    execute.reset_mock()
+    message = prefix_message(".tag show hello arguments")
+    await ui.handle_prefix_message(bot, message)
+    execute.assert_awaited_once_with(bot, message, row, "arguments", None)
+
+    assert not await ui.handle_prefix_message(bot, prefix_message("not a command"))
+    await bot.close()
+
+
+async def test_prefix_create_edit_alias_and_rename(monkeypatch):
+    row = tag()
+    bot = stats_bot(
+        get_tag=AsyncMock(side_effect=[None, row, row, None, row]),
+        save_alias=AsyncMock(),
+        rename=AsyncMock(),
+    )
+    save = AsyncMock(side_effect=["created", "edited"])
+    monkeypatch.setattr(ui, "save_tag", save)
+    monkeypatch.setattr(ui, "prefix_uploads", AsyncMock(return_value=[]))
+
+    create = prefix_message(".t create hello created content")
+    await ui.handle_prefix_message(bot, create)
+    assert save.await_args_list[0].args[2:5] == ("hello", "created content", [])
+    assert create.reply.await_args.args[0] == "created"
+
+    edit = prefix_message(".t edit hello edited content")
+    await ui.handle_prefix_message(bot, edit)
+    assert save.await_args_list[1].args[2:5] == ("hello", "edited content", [])
+    assert save.await_args_list[1].args[5] is row
+
+    alias = prefix_message('.t alias greeting "hello"')
+    await ui.handle_prefix_message(bot, alias)
+    assert bot.db.save_alias.await_args.args[1:] == (1, "greeting", 2, 10)
+
+    rename = prefix_message('.t rename hello "new name"')
+    await ui.handle_prefix_message(bot, rename)
+    bot.db.rename.assert_awaited_once_with(10, "new name")
+    await bot.close()
+
+
+async def test_prefix_info_list_random_and_remove(monkeypatch):
+    row = tag()
+    bot = stats_bot(
+        get_tag=AsyncMock(return_value=row),
+        file_names=AsyncMock(return_value=[]),
+        search=AsyncMock(return_value=[row]),
+        random=AsyncMock(return_value=row),
+        delete=AsyncMock(),
+    )
+    execute = AsyncMock()
+    monkeypatch.setattr(ui, "execute_message", execute)
+
+    info = prefix_message(".t info hello")
+    await ui.handle_prefix_message(bot, info)
+    assert info.reply.await_args.kwargs["embed"].title == "hello"
+
+    listing = prefix_message(".t list")
+    await ui.handle_prefix_message(bot, listing)
+    assert listing.reply.await_args.kwargs["embed"].title == "User 2's tags (1)"
+
+    random = prefix_message(".t random some arguments")
+    await ui.handle_prefix_message(bot, random)
+    execute.assert_awaited_once_with(
+        bot, random, row, "some arguments", None, "Showing tag: `hello`"
+    )
+
+    remove = prefix_message(".t remove tag hello")
+    await ui.handle_prefix_message(bot, remove)
+    bot.db.delete.assert_awaited_once_with(10)
     await bot.close()
 
 

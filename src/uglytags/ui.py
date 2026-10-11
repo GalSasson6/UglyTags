@@ -2,6 +2,7 @@ import io
 import logging
 import re
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import discord
 import psycopg
@@ -36,6 +37,20 @@ LIST_PAGE_SIZE = 25
 DETAIL_PAGE_SIZE = 10
 PERIODS = (0, 7, 30, 365)
 SORTS = ("most", "least", "recent", "unused", "newest", "oldest")
+PREFIX_COMMANDS = {
+    "add": "create",
+    "alias": "alias",
+    "create": "create",
+    "edit": "edit",
+    "info": "info",
+    "list": "list",
+    "owner": "info",
+    "random": "random",
+    "raw": "info",
+    "remove": "remove",
+    "rename": "rename",
+    "show": "show",
+}
 
 
 async def report_error(interaction: discord.Interaction, error: Exception):
@@ -73,6 +88,36 @@ def timestamp(value) -> str:
 
 def tag_content(tag: dict) -> str:
     return tag["reference_content"] or tag["content"]
+
+
+def prefix_argument(value: str, *, consume: bool = False) -> tuple[str, str] | None:
+    value = value.strip()
+    if not value:
+        return None
+    if consume:
+        if len(value) >= 2 and value[0] == value[-1] == '"':
+            value = value[1:-1].replace(r"\"", '"').replace(r"\\", "\\")
+        return value, ""
+    if value[0] != '"':
+        argument, _, rest = value.partition(" ")
+        return argument, rest.strip()
+    escaped = False
+    argument = []
+    for index, character in enumerate(value[1:], 1):
+        if escaped:
+            argument.append(character)
+            escaped = False
+        elif character == "\\":
+            escaped = True
+        elif character == '"':
+            return "".join(argument), value[index + 1 :].strip()
+        else:
+            argument.append(character)
+    return None
+
+
+def message_event(message: discord.Message):
+    return SimpleNamespace(guild_id=message.guild.id, user=message.author)
 
 
 class TagModal(discord.ui.Modal):
@@ -266,6 +311,37 @@ async def execute(
         )
         return
     await render.send_result(interaction, rt, result, title, lead_embed, reply_message)
+
+
+async def execute_message(
+    bot, message: discord.Message, tag: dict, arguments: str, attachment, title: str = ""
+):
+    await bot.db.use(tag, message.guild.id, message.author.id)
+    if is_group(tag):
+        tag = await bot.db.random_member(target_id(tag))
+        if tag is None:
+            await render.send_message_error(
+                message, "\n\n".join(part for part in (title, t("error.group_empty")) if part)
+            )
+            return
+        await bot.db.use(tag, message.guild.id, message.author.id)
+    rt = tagscript.Runtime(
+        client=bot,
+        guild=message.guild,
+        channel=message.channel,
+        user=message.author,
+        tag=tag,
+        attachment_url=attachment.url if attachment else None,
+        max_file_size=message.guild.filesize_limit,
+    )
+    try:
+        result = await tagscript.parse(rt, tag_content(tag), arguments)
+    except tagscript.TagError as error:
+        await render.send_message_error(
+            message, "\n\n".join(part for part in (title, str(error)) if part)
+        )
+        return
+    await render.send_message_result(message, rt, result, title)
 
 
 def info_embed(
@@ -531,6 +607,267 @@ class PrunePreview(ListView):
 
 def scope_text(user) -> str:
     return t("scope.user", user=user.mention) if user else t("scope.server")
+
+
+async def prefix_reply(message: discord.Message, content: str, **kwargs):
+    return await message.reply(
+        content,
+        mention_author=False,
+        allowed_mentions=discord.AllowedMentions.none(),
+        **kwargs,
+    )
+
+
+async def prefix_uploads(bot, message: discord.Message):
+    try:
+        return await read_uploads(message.attachments, bot.max_media_bytes)
+    except MediaError as error:
+        await prefix_reply(message, t(str(error), max_media_mb=bot.max_media_mb))
+        return None
+
+
+async def handle_prefix_message(bot, message: discord.Message) -> bool:
+    if message.guild is None or message.author.bot:
+        return False
+    match = re.match(r"^\.(t|tag)(?:\s+(.*))?$", message.content, re.IGNORECASE | re.DOTALL)
+    if match is None:
+        return False
+    value = (match[2] or "").strip()
+    first = prefix_argument(value)
+    if first is None:
+        await prefix_reply(message, t("prefix.usage", usage=".t <tag> [arguments]"))
+        return True
+    command = PREFIX_COMMANDS.get(first[0].lower())
+    if command is None:
+        await prefix_show(bot, message, first[0], first[1])
+        return True
+    if command == "show":
+        tag_argument = prefix_argument(first[1])
+        if tag_argument is None:
+            await prefix_reply(message, t("prefix.usage", usage=".t show <tag> [arguments]"))
+        else:
+            await prefix_show(bot, message, tag_argument[0], tag_argument[1])
+        return True
+    handlers = {
+        "alias": prefix_alias,
+        "create": prefix_create,
+        "edit": prefix_edit,
+        "info": prefix_info,
+        "list": prefix_list,
+        "random": prefix_random,
+        "remove": prefix_remove,
+        "rename": prefix_rename,
+    }
+    await handlers[command](bot, message, first[1])
+    return True
+
+
+async def prefix_find(bot, message: discord.Message, name: str):
+    tag = await bot.db.get_tag(message.guild.id, clean_name(name))
+    if tag is None:
+        await prefix_reply(message, t("error.unknown_tag"))
+    return tag
+
+
+async def prefix_show(bot, message: discord.Message, name: str, arguments: str):
+    tag = await prefix_find(bot, message, name)
+    if tag is not None:
+        await execute_message(
+            bot,
+            message,
+            tag,
+            arguments,
+            message.attachments[0] if message.attachments else None,
+        )
+
+
+async def prefix_create(bot, message: discord.Message, value: str):
+    parsed = prefix_argument(value)
+    if parsed is None or not parsed[1].strip():
+        await prefix_reply(message, t("prefix.usage", usage=".t create <tag> <content>"))
+        return
+    name, content = clean_name(parsed[0]), parsed[1].strip()
+    if not 0 < len(name) <= MAX_NAME:
+        await prefix_reply(message, t("error.name", limit=MAX_NAME))
+        return
+    if await bot.db.get_tag(message.guild.id, name):
+        await prefix_reply(message, t("error.tag_exists"))
+        return
+    uploads = await prefix_uploads(bot, message)
+    if uploads is not None:
+        await prefix_reply(
+            message, await save_tag(bot, message_event(message), name, content, uploads, None)
+        )
+
+
+async def prefix_edit(bot, message: discord.Message, value: str):
+    parsed = prefix_argument(value)
+    if parsed is None or not parsed[1].strip():
+        await prefix_reply(message, t("prefix.usage", usage=".t edit <tag> <content>"))
+        return
+    tag = await prefix_find(bot, message, parsed[0])
+    if tag is None:
+        return
+    event = message_event(message)
+    if not can_overwrite(event, tag):
+        await prefix_reply(message, t("error.not_owner"))
+        return
+    if is_group(tag):
+        await prefix_reply(message, t("error.group_content"))
+        return
+    uploads = await prefix_uploads(bot, message)
+    if uploads is not None:
+        result = await save_tag(bot, event, tag["name"], parsed[1].strip(), uploads, tag)
+        await prefix_reply(message, result)
+
+
+async def prefix_alias(bot, message: discord.Message, value: str):
+    parsed = prefix_argument(value)
+    target_argument = prefix_argument(parsed[1], consume=True) if parsed else None
+    if parsed is None or target_argument is None:
+        await prefix_reply(message, t("prefix.usage", usage=".t alias <new name> <tag>"))
+        return
+    name = clean_name(parsed[0])
+    target = await prefix_find(bot, message, target_argument[0])
+    if target is None:
+        return
+    if not 0 < len(name) <= MAX_NAME:
+        await prefix_reply(message, t("error.name", limit=MAX_NAME))
+        return
+    reference_id = target["reference_id"] or target["id"]
+    reference_name = target["reference_name"] or target["name"]
+    if reference_name.lower() == name.lower():
+        await prefix_reply(message, t("result.ok"))
+        return
+    existing = await bot.db.get_tag(message.guild.id, name)
+    if existing and existing["owner_id"] != message.author.id:
+        await prefix_reply(message, t("error.alias_not_owner"))
+        return
+    if existing and not existing["reference_id"]:
+        await prefix_reply(message, t("error.alias_regular"))
+        return
+    try:
+        await bot.db.save_alias(
+            existing["id"] if existing else new_id(),
+            message.guild.id,
+            name,
+            message.author.id,
+            reference_id,
+        )
+    except psycopg.errors.UniqueViolation:
+        await prefix_reply(message, t("error.tag_exists"))
+        return
+    await prefix_reply(message, t("result.alias", name=code(name), target=code(reference_name)))
+
+
+async def prefix_rename(bot, message: discord.Message, value: str):
+    parsed = prefix_argument(value)
+    name_argument = prefix_argument(parsed[1], consume=True) if parsed else None
+    if parsed is None or name_argument is None:
+        await prefix_reply(message, t("prefix.usage", usage=".t rename <tag> <new name>"))
+        return
+    tag = await prefix_find(bot, message, parsed[0])
+    if tag is None:
+        return
+    if not can_overwrite(message_event(message), tag):
+        await prefix_reply(message, t("error.not_owner"))
+        return
+    name = clean_name(name_argument[0])
+    if not 0 < len(name) <= MAX_NAME:
+        await prefix_reply(message, t("error.name", limit=MAX_NAME))
+        return
+    if tag["name"] == name:
+        await prefix_reply(message, t("result.ok"))
+        return
+    try:
+        await bot.db.rename(tag["id"], name)
+    except psycopg.errors.UniqueViolation:
+        await prefix_reply(message, t("error.tag_exists"))
+        return
+    await prefix_reply(message, t("result.renamed", old=code(tag["name"]), new=code(name)))
+
+
+async def prefix_info(bot, message: discord.Message, value: str):
+    parsed = prefix_argument(value, consume=True)
+    if parsed is None:
+        await prefix_reply(message, t("prefix.usage", usage=".t info <tag>"))
+        return
+    tag = await prefix_find(bot, message, parsed[0])
+    if tag is None:
+        return
+    names = await bot.db.file_names(tag["reference_id"] or tag["id"])
+    members = await bot.db.group_members(tag["id"]) if tag["is_group"] else None
+    await prefix_reply(message, "", embed=info_embed(tag, names, members))
+
+
+async def prefix_list(bot, message: discord.Message, value: str):
+    user = message.author
+    if value:
+        match = re.fullmatch(r"<@!?(\d+)>|(\d+)", value.strip())
+        user_id = int(next(part for part in match.groups() if part)) if match else None
+        user = (
+            message.guild.get_member(user_id)
+            if user_id
+            else message.guild.get_member_named(value.strip())
+        )
+        if user is None or user.bot:
+            await prefix_reply(message, t("prefix.user_not_found"))
+            return
+    tags = await bot.db.search(message.guild.id, owner_id=user.id)
+    if not tags:
+        await prefix_reply(message, t("error.no_tags"))
+        return
+    title = t("list.user", user=user.display_name, count=f"{len(tags):,}")
+    view = ListView(message.author.id, title, [code(tag["name"]) for tag in tags])
+    sent = await prefix_reply(
+        message,
+        "",
+        embed=view.embed(),
+        view=view if len(view.pages) > 1 else discord.utils.MISSING,
+    )
+    view.message = sent
+
+
+async def prefix_random(bot, message: discord.Message, arguments: str):
+    tag = await bot.db.random(message.guild.id)
+    if tag is None:
+        await render.send_message_error(message, t("error.no_tags"))
+        return
+    await execute_message(
+        bot,
+        message,
+        tag,
+        arguments,
+        message.attachments[0] if message.attachments else None,
+        t("show.random_title", name=code(tag["name"])),
+    )
+
+
+async def prefix_remove(bot, message: discord.Message, value: str):
+    if value.lower().startswith("tag "):
+        value = value[4:]
+    parsed = prefix_argument(value, consume=True)
+    if parsed is None:
+        await prefix_reply(message, t("prefix.usage", usage=".t remove <tag>"))
+        return
+    tag = await prefix_find(bot, message, parsed[0])
+    if tag is None:
+        return
+    if tag["owner_id"] == message.author.id:
+        await bot.db.delete(tag["id"])
+        await prefix_reply(message, t("result.removed", name=code(tag["name"])))
+        return
+    member_permissions = message.author.guild_permissions
+    if not (member_permissions.manage_guild or member_permissions.ban_members):
+        await prefix_reply(message, t("error.not_owner"))
+        return
+    embed = discord.Embed(
+        title=t("remove.force_title"),
+        description=t("remove.force_body", name=code(tag["name"])),
+        colour=discord.Colour.blurple(),
+    )
+    view = ForceRemove(bot, message.author.id, tag, embed)
+    view.message = await prefix_reply(message, "", embed=embed, view=view)
 
 
 def format_size(size: int) -> str:
