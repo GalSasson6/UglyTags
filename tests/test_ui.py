@@ -118,7 +118,12 @@ async def test_commands_and_intents():
         "tag export",
         "tag import",
     }
-    assert bot.intents.members and bot.intents.presences and bot.intents.message_content
+    assert (
+        bot.intents.guild_messages
+        and bot.intents.members
+        and bot.intents.presences
+        and bot.intents.message_content
+    )
     payload = group.to_dict(bot.tree)
     for option in payload["options"]:
         assert len(option["description"]) <= 100

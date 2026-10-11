@@ -39,6 +39,7 @@ class UglyTags(discord.Client):
     ):
         intents = discord.Intents.none()
         intents.guilds = True
+        intents.guild_messages = True
         intents.members = True
         intents.presences = True
         intents.message_content = True
