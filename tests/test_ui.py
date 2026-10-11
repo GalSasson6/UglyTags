@@ -76,9 +76,8 @@ def prefix_message(content, user_id=2, attachments=None, **permissions):
         content=content,
         author=author,
         guild=guild,
-        channel=SimpleNamespace(),
+        channel=SimpleNamespace(send=AsyncMock(return_value=AsyncMock())),
         attachments=attachments or [],
-        reply=AsyncMock(return_value=AsyncMock()),
     )
 
 
@@ -173,7 +172,7 @@ async def test_prefix_create_edit_alias_and_rename(monkeypatch):
     create = prefix_message(".t create hello created content")
     await ui.handle_prefix_message(bot, create)
     assert save.await_args_list[0].args[2:5] == ("hello", "created content", [])
-    assert create.reply.await_args.args[0] == "created"
+    assert create.channel.send.await_args.args[0] == "created"
 
     edit = prefix_message(".t edit hello edited content")
     await ui.handle_prefix_message(bot, edit)
@@ -204,11 +203,11 @@ async def test_prefix_info_list_random_and_remove(monkeypatch):
 
     info = prefix_message(".t info hello")
     await ui.handle_prefix_message(bot, info)
-    assert info.reply.await_args.kwargs["embed"].title == "hello"
+    assert info.channel.send.await_args.kwargs["embed"].title == "hello"
 
     listing = prefix_message(".t list")
     await ui.handle_prefix_message(bot, listing)
-    assert listing.reply.await_args.kwargs["embed"].title == "User 2's tags (1)"
+    assert listing.channel.send.await_args.kwargs["embed"].title == "User 2's tags (1)"
 
     random = prefix_message(".t random some arguments")
     await ui.handle_prefix_message(bot, random)

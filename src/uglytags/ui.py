@@ -610,9 +610,8 @@ def scope_text(user) -> str:
 
 
 async def prefix_reply(message: discord.Message, content: str, **kwargs):
-    return await message.reply(
+    return await message.channel.send(
         content,
-        mention_author=False,
         allowed_mentions=discord.AllowedMentions.none(),
         **kwargs,
     )

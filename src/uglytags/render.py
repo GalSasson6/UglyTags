@@ -599,9 +599,8 @@ async def send_message_result(message: discord.Message, rt, result, title: str =
         await send_message_error(message, "\n\n".join(part for part in (title, str(error)) if part))
         return
     try:
-        sent = await message.reply(
+        sent = await message.channel.send(
             **prepared.edit_kwargs(),
-            mention_author=False,
             allowed_mentions=discord.AllowedMentions.none(),
         )
     except discord.HTTPException as error:
@@ -617,9 +616,8 @@ async def send_message_result(message: discord.Message, rt, result, title: str =
 
 
 async def send_message_error(message: discord.Message, content: str):
-    await message.reply(
+    await message.channel.send(
         content[:2000],
         view=delete_view(message.author.id),
-        mention_author=False,
         allowed_mentions=discord.AllowedMentions.none(),
     )
