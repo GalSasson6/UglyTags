@@ -19,8 +19,9 @@ delete button is left out.
   `attachment` is used by `{image}`, `{media}`, and similar functions. Discord does
   not allow `/tag` to take a tag name because it has subcommands, so showing a tag
   uses NotSoBot's `t` alias.
-- `.t name [arguments]` and `.tag name [arguments]`: run a tag from chat. Quote names
-  containing spaces. The original `.t show`/`.tag show` aliases also work.
+- `.t name [arguments]` and `.tag name [arguments]`: run a tag from chat and reply to
+  the command message without pinging its author. Quote names containing spaces. The
+  original `.t show`/`.tag show` aliases also work.
 - `.t create`, `.t edit`, `.t alias`, `.t rename`, `.t info`, `.t list`, `.t random`,
   and `.t remove`: provide the original bot's core chat management commands. `.t add`,
   `.t owner`, and `.t raw` remain aliases. Create and edit store files attached to the
@@ -247,8 +248,7 @@ and malformed entries are skipped and counted.
 Create an application and bot in the Discord Developer Portal and enable the
 privileged Server Members, Presence, and Message Content intents. Install it in a
 server with the `bot` and `applications.commands` scopes. Grant View Channel, Send
-Messages, Embed Links, and Attach Files. Read Message History is only needed for the
-message reply shortcut, not `.t` chat commands. Bots in 100 or more
+Messages, Embed Links, Attach Files, and Read Message History. Bots in 100 or more
 servers need Discord's approval for privileged intents. Keep the bot token private.
 
 Python 3.11+ and PostgreSQL 18 are supported. Install [uv](https://docs.astral.sh/uv/),

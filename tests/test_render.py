@@ -89,14 +89,15 @@ async def test_message_result_uses_send_payload():
     sent = SimpleNamespace(edit=AsyncMock())
     message = SimpleNamespace(
         author=SimpleNamespace(id=7),
-        channel=SimpleNamespace(send=AsyncMock(return_value=sent)),
+        reply=AsyncMock(return_value=sent),
     )
     result = await result_of("hello{attachtext:file body}")
     await render.send_message_result(message, runtime(), result)
-    kwargs = message.channel.send.await_args.kwargs
+    kwargs = message.reply.await_args.kwargs
     assert kwargs["content"] == "hello"
     assert kwargs["files"][0].filename == "content.txt"
     assert "attachments" not in kwargs
+    assert not kwargs["mention_author"]
 
 
 async def test_prepare_legacy_buttons_and_selects():

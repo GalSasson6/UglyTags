@@ -73,8 +73,9 @@ class UglyTags(discord.Client):
             await handle_prefix_message(self, message)
         except Exception:
             log.exception("Prefix command failed")
-            await message.channel.send(
+            await message.reply(
                 t("error.generic"),
+                mention_author=False,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
 
