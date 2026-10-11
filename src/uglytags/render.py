@@ -32,6 +32,14 @@ class Prepared:
             "view": self.view,
         }
 
+    def send_kwargs(self) -> dict:
+        return {
+            "content": self.content,
+            "embeds": self.embeds,
+            "files": [to_discord_file(file) for file in self.files],
+            "view": self.view,
+        }
+
 
 def to_discord_file(file: tagscript.TagFile) -> discord.File:
     data = file.data.encode() if isinstance(file.data, str) else file.data
@@ -600,7 +608,7 @@ async def send_message_result(message: discord.Message, rt, result, title: str =
         return
     try:
         sent = await message.channel.send(
-            **prepared.edit_kwargs(),
+            **prepared.send_kwargs(),
             allowed_mentions=discord.AllowedMentions.none(),
         )
     except discord.HTTPException as error:

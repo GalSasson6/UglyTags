@@ -73,6 +73,9 @@ async def test_prepare_plain_message_with_files_and_embeds():
     assert prepared.embeds[0].title == "t"
     kwargs = prepared.edit_kwargs()
     assert kwargs["attachments"][0].filename == "content.txt"
+    send_kwargs = prepared.send_kwargs()
+    assert "attachments" not in send_kwargs
+    assert send_kwargs["files"][0].filename == "content.txt"
     trash = prepared.view.to_components()[0]["components"][0]
     assert (trash["custom_id"], trash["style"], trash["emoji"]["name"]) == (
         TRASH_ID,
@@ -80,6 +83,20 @@ async def test_prepare_plain_message_with_files_and_embeds():
         render.TRASH_EMOJI,
     )
     assert render.prepare(runtime(), await result_of("   ")).content == "Tag returned no content"
+
+
+async def test_message_result_uses_send_payload():
+    sent = SimpleNamespace(edit=AsyncMock())
+    message = SimpleNamespace(
+        author=SimpleNamespace(id=7),
+        channel=SimpleNamespace(send=AsyncMock(return_value=sent)),
+    )
+    result = await result_of("hello{attachtext:file body}")
+    await render.send_message_result(message, runtime(), result)
+    kwargs = message.channel.send.await_args.kwargs
+    assert kwargs["content"] == "hello"
+    assert kwargs["files"][0].filename == "content.txt"
+    assert "attachments" not in kwargs
 
 
 async def test_prepare_legacy_buttons_and_selects():
