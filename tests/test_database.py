@@ -138,6 +138,21 @@ async def test_bulk_delete_server_snapshot_and_cascades(db):
     assert await db.delete_matching(1, snapshot) == 0
 
 
+async def test_bulk_delete_owned_checks_only_guild_scoped_snapshot(db):
+    own_id, other_id, other_guild_id = new_id(), new_id(), new_id()
+    await db.create_tag(own_id, 1, "own", "x", 7)
+    await db.create_tag(other_id, 1, "other", "x", 8)
+    await db.create_tag(other_guild_id, 2, "other guild", "x", 7)
+
+    assert await db.delete_matching_owned(1, [own_id, other_id, other_guild_id], 7) is None
+    assert await db.get_tag_by_id(own_id) is not None
+    assert await db.get_tag_by_id(other_id) is not None
+    assert await db.delete_matching_owned(1, [own_id, other_guild_id], 7) == 1
+    assert await db.get_tag_by_id(own_id) is None
+    assert await db.get_tag_by_id(other_id) is not None
+    assert await db.get_tag_by_id(other_guild_id) is not None
+
+
 async def test_storage_variables_are_scoped_and_limited(db):
     tag_id = new_id()
     await db.create_tag(tag_id, 1, "counter", "x", 7)

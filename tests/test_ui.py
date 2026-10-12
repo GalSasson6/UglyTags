@@ -108,6 +108,7 @@ async def test_commands_and_intents():
     assert group.guild_only
     assert {command.qualified_name for command in group.walk_commands()} >= {
         "tag create",
+        "tag add",
         "tag edit",
         "tag alias",
         "tag rename",
@@ -522,10 +523,11 @@ async def test_create_conflict_without_content_opens_form():
     await bot.close()
 
 
-async def test_create_without_conflict_requires_confirmation():
+@pytest.mark.parametrize("command_name", ["create", "add"])
+async def test_create_without_conflict_requires_confirmation(command_name):
     bot = conflict_bot(None)
     event = interaction()
-    await command(bot, "create")(event, "fresh", "body")
+    await command(bot, command_name)(event, "fresh", "body")
     bot.db.create_tag.assert_not_awaited()
     view = event.followup.send.await_args.kwargs["view"]
     click = button_event()
@@ -549,15 +551,23 @@ async def test_slash_save_confirmation(editing, form, monkeypatch):
     if form:
         modal = event.response.send_modal.await_args.args[0]
         modal.content._value = "body"
+        attachment = SimpleNamespace(size=4, filename="file.txt")
+        modal.upload._values = [attachment]
         submit = interaction()
         await modal.on_submit(submit)
         event = submit
     save.assert_not_awaited()
     view = event.followup.send.await_args.kwargs["view"]
     assert isinstance(view, ui.SaveConfirmation)
+    ui.read_uploads.assert_not_awaited()
+    if form:
+        assert view.attachments == [attachment]
     click = button_event()
     await view.confirm.callback(click)
     save.assert_awaited_once_with(bot, click, "hello", "body", uploads, row)
+    assert view.attachments == []
+    if form:
+        ui.read_uploads.assert_awaited_once_with([attachment], bot.max_media_bytes)
     await view.confirm.callback(click)
     assert save.await_count == 1
     await bot.close()
@@ -576,6 +586,7 @@ async def test_save_cancellation_and_timeout_do_not_write(editing, action, monke
     else:
         await view.on_timeout()
         assert view.message.edit.await_args.kwargs["view"] is None
+    assert view.attachments == []
     save.assert_not_awaited()
     view.stop()
 
@@ -647,6 +658,7 @@ async def test_remove_all_deletes_only_the_confirmed_guild_snapshot(administrato
     bot = stats_bot(
         search=AsyncMock(return_value=rows),
         delete_matching=AsyncMock(return_value=2),
+        delete_matching_owned=AsyncMock(return_value=2),
     )
     event = interaction(administrator=administrator)
     await command(bot, "remove", "all")(event, None, None, None)
@@ -660,10 +672,16 @@ async def test_remove_all_deletes_only_the_confirmed_guild_snapshot(administrato
     click.user.guild_permissions = discord.Permissions(administrator=administrator)
     await view.confirm.callback(click)
     click.response.defer.assert_awaited_once()
-    bot.db.delete_matching.assert_awaited_once_with(1, [10, 11])
+    if administrator:
+        bot.db.delete_matching.assert_awaited_once_with(1, [10, 11])
+        bot.db.delete_matching_owned.assert_not_awaited()
+    else:
+        bot.db.delete_matching.assert_not_awaited()
+        bot.db.delete_matching_owned.assert_awaited_once_with(1, [10, 11], 2)
     assert "removed 2 tags" in click.edit_original_response.await_args.kwargs["content"]
     await view.confirm.callback(click)
-    assert bot.db.delete_matching.await_count == 1
+    delete = bot.db.delete_matching if administrator else bot.db.delete_matching_owned
+    assert delete.await_count == 1
     await bot.close()
 
 
@@ -672,6 +690,7 @@ async def test_remove_all_rechecks_permissions_and_can_cancel(action):
     bot = stats_bot(
         search=AsyncMock(return_value=[tag()]),
         delete_matching=AsyncMock(),
+        delete_matching_owned=AsyncMock(return_value=None),
     )
     event = interaction(administrator=action != "owner_changed")
     await command(bot, "remove", "all")(event, None, None, None)
@@ -689,6 +708,10 @@ async def test_remove_all_rechecks_permissions_and_can_cancel(action):
         await view.confirm.callback(click)
         assert "Not enough permissions" in click.edit_original_response.await_args.kwargs["content"]
     bot.db.delete_matching.assert_not_awaited()
+    if action == "owner_changed":
+        bot.db.delete_matching_owned.assert_awaited_once_with(1, [10], 2)
+    else:
+        bot.db.delete_matching_owned.assert_not_awaited()
     view.stop()
     await bot.close()
 

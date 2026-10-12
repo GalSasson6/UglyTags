@@ -150,13 +150,13 @@ class TagModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
-        try:
-            uploads = await read_uploads(self.upload.values, self.bot.max_media_bytes)
-        except MediaError as error:
-            await reply(interaction, t(str(error), max_media_mb=self.bot.max_media_mb))
-            return
         await confirm_save(
-            self.bot, interaction, self.name, self.content.value.strip(), uploads, self.tag
+            self.bot,
+            interaction,
+            self.name,
+            self.content.value.strip(),
+            self.upload.values,
+            self.tag,
         )
 
     async def on_error(self, interaction: discord.Interaction, error: Exception):
@@ -388,10 +388,10 @@ class OwnedView(discord.ui.View):
 
 
 class SaveConfirmation(OwnedView):
-    def __init__(self, bot, owner_id, guild_id, name, content, uploads, expected):
+    def __init__(self, bot, owner_id, guild_id, name, content, attachments, expected):
         super().__init__(owner_id, CONFIRM_TIMEOUT)
         self.bot, self.guild_id, self.name = bot, guild_id, name
-        self.content, self.uploads, self.expected = content, uploads, expected
+        self.content, self.attachments, self.expected = content, attachments, expected
 
     @discord.ui.button(label=t("action.continue"), style=discord.ButtonStyle.primary)
     async def confirm(self, interaction, button):
@@ -399,17 +399,27 @@ class SaveConfirmation(OwnedView):
             return
         self.stop()
         await interaction.response.defer()
+        attachments, self.attachments = self.attachments, []
+        try:
+            uploads = await read_uploads(attachments, self.bot.max_media_bytes)
+        except MediaError as error:
+            await interaction.edit_original_response(
+                content=t(str(error), max_media_mb=self.bot.max_media_mb), view=None
+            )
+            return
         message = await save_tag(
-            self.bot, interaction, self.name, self.content, self.uploads, self.expected
+            self.bot, interaction, self.name, self.content, uploads, self.expected
         )
         await interaction.edit_original_response(content=message, view=None)
 
     @discord.ui.button(label=t("action.cancel"), style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction, button):
         self.stop()
+        self.attachments = []
         await interaction.response.edit_message(content=t("save.cancelled"), view=None)
 
     async def on_timeout(self):
+        self.attachments = []
         if self.message:
             try:
                 await self.message.edit(content=t("create.expired"), view=None)
@@ -560,17 +570,23 @@ class RemoveAll(OwnedView):
             return
         self.stop()
         await interaction.response.defer()
-        current = await self.bot.db.search(self.guild_id)
-        selected = {tag["id"] for tag in self.tags}
-        if not permissions(interaction).administrator and (
-            self.options["userId"] != str(interaction.user.id)
-            or any(
-                tag["id"] in selected and tag["owner_id"] != interaction.user.id for tag in current
-            )
+        if not permissions(interaction).administrator and self.options["userId"] != str(
+            interaction.user.id
         ):
             await interaction.edit_original_response(content=t("error.remove_others"), view=None)
             return
-        count = await self.bot.db.delete_matching(self.guild_id, [tag["id"] for tag in self.tags])
+        tag_ids = [tag["id"] for tag in self.tags]
+        if permissions(interaction).administrator:
+            count = await self.bot.db.delete_matching(self.guild_id, tag_ids)
+        else:
+            count = await self.bot.db.delete_matching_owned(
+                self.guild_id, tag_ids, interaction.user.id
+            )
+            if count is None:
+                await interaction.edit_original_response(
+                    content=t("error.remove_others"), view=None
+                )
+                return
         await interaction.edit_original_response(
             content=t("remove_all.done", count=f"{count:,}", scope=self.scope), view=None
         )
@@ -691,11 +707,10 @@ async def prefix_reply(message: discord.Message, content: str, **kwargs):
 
 
 async def prefix_uploads(bot, message: discord.Message):
-    try:
-        return await read_uploads(message.attachments, bot.max_media_bytes)
-    except MediaError as error:
-        await prefix_reply(message, t(str(error), max_media_mb=bot.max_media_mb))
+    if any(not 0 < attachment.size <= bot.max_media_bytes for attachment in message.attachments):
+        await prefix_reply(message, t("error.media_size", max_media_mb=bot.max_media_mb))
         return None
+    return message.attachments
 
 
 async def handle_prefix_message(bot, message: discord.Message) -> bool:
@@ -1097,9 +1112,7 @@ def register_commands(bot):
         if tag:
             await execute(bot, interaction, tag, arguments or "", attachment)
 
-    @group.command(name="create", description=t("command.create"))
-    @app_commands.describe(name=t("option.new_name"), content=t("option.content"))
-    async def create(interaction: discord.Interaction, name: str, content: str | None = None):
+    async def create_tag(interaction: discord.Interaction, name: str, content: str | None = None):
         name = valid_name(name)
         if name is None:
             await reply(interaction, t("error.name", limit=MAX_NAME))
@@ -1140,6 +1153,16 @@ def register_commands(bot):
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
         await confirm_save(bot, interaction, name, content.strip(), [], None)
+
+    @group.command(name="create", description=t("command.create"))
+    @app_commands.describe(name=t("option.new_name"), content=t("option.content"))
+    async def create(interaction: discord.Interaction, name: str, content: str | None = None):
+        await create_tag(interaction, name, content)
+
+    @group.command(name="add", description=t("command.create"))
+    @app_commands.describe(name=t("option.new_name"), content=t("option.content"))
+    async def add(interaction: discord.Interaction, name: str, content: str | None = None):
+        await create_tag(interaction, name, content)
 
     @group.command(name="edit", description=t("command.edit"))
     @app_commands.describe(name=t("option.name"), content=t("option.content"))
