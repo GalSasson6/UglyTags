@@ -50,6 +50,7 @@ PREFIX_COMMANDS = {
     "raw": "info",
     "remove": "remove",
     "rename": "rename",
+    "search": "search",
     "show": "show",
 }
 
@@ -745,6 +746,7 @@ async def handle_prefix_message(bot, message: discord.Message) -> bool:
         "random": prefix_random,
         "remove": prefix_remove,
         "rename": prefix_rename,
+        "search": prefix_search,
     }
     await handlers[command](bot, message, first[1])
     return True
@@ -939,6 +941,23 @@ async def prefix_list(bot, message: discord.Message, value: str):
         await prefix_reply(message, t("error.no_tags"))
         return
     title = t("list.user", user=user.display_name, count=f"{len(tags):,}")
+    await prefix_send_list(message, title, tags)
+
+
+async def prefix_search(bot, message: discord.Message, value: str):
+    parsed = prefix_argument(value, consume=True)
+    if parsed is None or not parsed[0]:
+        await prefix_list(bot, message, "")
+        return
+    tags = await bot.db.search(message.guild.id, name=parsed[0])
+    if not tags:
+        await prefix_reply(message, t("error.no_matching_tags"))
+        return
+    title = t("list.server", guild=message.guild.name, count=f"{len(tags):,}")
+    await prefix_send_list(message, title, tags)
+
+
+async def prefix_send_list(message: discord.Message, title: str, tags: list):
     view = ListView(message.author.id, title, [code(tag["name"]) for tag in tags])
     sent = await prefix_reply(
         message,

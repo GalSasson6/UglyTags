@@ -33,6 +33,9 @@ delete button is left out.
   Explicit content or command attachments take priority over the reply.
   Use the slash commands for forms, filters, imports, exports, groups,
   statistics, and pruning.
+- `.t search name`: list the server's tags whose names contain `name` (case-insensitive),
+  matching `/tag list server name:`. Quote names containing spaces. Without a name it
+  behaves like `.t list`.
 - **Apps > tag reply**: right-click a message (or long-press on mobile)
   and choose this shortcut (prefixed with a speech-bubble icon). A private form offers your 25 most recently used tags in
   this server, newest first, with optional arguments and one attachment. Submitting

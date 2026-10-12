@@ -69,6 +69,7 @@ def prefix_message(content, user_id=2, attachments=None, **permissions):
     )
     guild = SimpleNamespace(
         id=1,
+        name="Guild",
         filesize_limit=20_000_000,
         get_member=lambda member_id: author if member_id == user_id else None,
         get_member_named=lambda name: author if name == author.display_name else None,
@@ -387,6 +388,29 @@ async def test_prefix_info_list_random_and_remove(monkeypatch):
     view = remove.reply.await_args.kwargs["view"]
     await view.confirm.callback(button_event())
     bot.db.delete_matching.assert_awaited_once_with(1, [10])
+    await bot.close()
+
+
+async def test_prefix_search_matches_server_tag_names():
+    row = tag()
+    bot = stats_bot(search=AsyncMock(return_value=[row]))
+
+    search = prefix_message('.t search "hel lo"')
+    await ui.handle_prefix_message(bot, search)
+    bot.db.search.assert_awaited_once_with(1, name="hel lo")
+    assert search.reply.await_args.kwargs["embed"].title == "Guild's tags (1)"
+
+    for content in (".t search", '.t search ""'):
+        bot.db.search.reset_mock()
+        listing = prefix_message(content)
+        await ui.handle_prefix_message(bot, listing)
+        bot.db.search.assert_awaited_once_with(1, owner_id=2)
+        assert listing.reply.await_args.kwargs["embed"].title == "User 2's tags (1)"
+
+    bot.db.search = AsyncMock(return_value=[])
+    missing = prefix_message(".t search nothing")
+    await ui.handle_prefix_message(bot, missing)
+    assert missing.reply.await_args.args[0] == ui.t("error.no_matching_tags")
     await bot.close()
 
 
