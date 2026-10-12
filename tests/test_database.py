@@ -119,6 +119,40 @@ async def test_search_random_autocomplete_and_bulk_delete(db):
     assert len(await db.search(1)) == 2
 
 
+async def test_bulk_delete_server_snapshot_and_cascades(db):
+    tag_id, alias_id, other_id = new_id(), new_id(), new_id()
+    await db.create_tag(tag_id, 1, "original", "{attach:a.txt}", 7, {"a.txt": b"a"})
+    await db.save_alias(alias_id, 1, "alias", 8, tag_id)
+    await db.create_tag(other_id, 2, "original", "other server", 7)
+    await db.set_variable(tag_id, "server", 1, "count", "1")
+    await db.use(await db.get_tag_by_id(tag_id), 1, 7)
+    snapshot = [tag["id"] for tag in await db.search(1)]
+    new_tag_id = new_id()
+    await db.create_tag(new_tag_id, 1, "new", "added after confirmation prompt", 8)
+    await db.delete_matching(1, snapshot + [other_id])
+    assert [tag["id"] for tag in await db.search(1)] == [new_tag_id]
+    assert (await db.get_tag(2, "original"))["id"] == other_id
+    assert await db.file_names(tag_id) == []
+    assert await db.variables(tag_id, "server", 1) == {}
+    assert (await db.fetchone("SELECT count(*) AS count FROM tag_uses"))["count"] == 0
+    assert await db.delete_matching(1, snapshot) == 0
+
+
+async def test_bulk_delete_owned_checks_only_guild_scoped_snapshot(db):
+    own_id, other_id, other_guild_id = new_id(), new_id(), new_id()
+    await db.create_tag(own_id, 1, "own", "x", 7)
+    await db.create_tag(other_id, 1, "other", "x", 8)
+    await db.create_tag(other_guild_id, 2, "other guild", "x", 7)
+
+    assert await db.delete_matching_owned(1, [own_id, other_id, other_guild_id], 7) is None
+    assert await db.get_tag_by_id(own_id) is not None
+    assert await db.get_tag_by_id(other_id) is not None
+    assert await db.delete_matching_owned(1, [own_id, other_guild_id], 7) == 1
+    assert await db.get_tag_by_id(own_id) is None
+    assert await db.get_tag_by_id(other_id) is not None
+    assert await db.get_tag_by_id(other_guild_id) is not None
+
+
 async def test_storage_variables_are_scoped_and_limited(db):
     tag_id = new_id()
     await db.create_tag(tag_id, 1, "counter", "x", 7)

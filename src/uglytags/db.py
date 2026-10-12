@@ -182,6 +182,22 @@ class Database:
         )
         return cursor.rowcount
 
+    async def delete_matching_owned(
+        self, guild_id: int, tag_ids: list[int], owner_id: int
+    ) -> int | None:
+        async with self.pool.connection() as connection, connection.transaction():
+            cursor = await connection.execute(
+                """SELECT id, owner_id FROM tags
+                   WHERE guild_id = %s AND id = ANY(%s) FOR UPDATE""",
+                (guild_id, tag_ids),
+            )
+            if any(tag["owner_id"] != owner_id for tag in await cursor.fetchall()):
+                return None
+            cursor = await connection.execute(
+                "DELETE FROM tags WHERE guild_id = %s AND id = ANY(%s)", (guild_id, tag_ids)
+            )
+            return cursor.rowcount
+
     async def random(self, guild_id: int, *, name=None, content=None, owner_id=None):
         where, params = filters(guild_id, name, content, owner_id)
         cursor = await self.execute(

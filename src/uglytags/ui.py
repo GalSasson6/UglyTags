@@ -41,6 +41,7 @@ PREFIX_COMMANDS = {
     "add": "create",
     "alias": "alias",
     "create": "create",
+    "delete": "remove",
     "edit": "edit",
     "info": "info",
     "list": "list",
@@ -149,15 +150,14 @@ class TagModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
-        try:
-            uploads = await read_uploads(self.upload.values, self.bot.max_media_bytes)
-        except MediaError as error:
-            await reply(interaction, t(str(error), max_media_mb=self.bot.max_media_mb))
-            return
-        message = await save_tag(
-            self.bot, interaction, self.name, self.content.value.strip(), uploads, self.tag
+        await confirm_save(
+            self.bot,
+            interaction,
+            self.name,
+            self.content.value.strip(),
+            self.upload.values,
+            self.tag,
         )
-        await reply(interaction, message)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception):
         await report_error(interaction, error)
@@ -387,6 +387,58 @@ class OwnedView(discord.ui.View):
         await report_error(interaction, error)
 
 
+class SaveConfirmation(OwnedView):
+    def __init__(self, bot, owner_id, guild_id, name, content, attachments, expected):
+        super().__init__(owner_id, CONFIRM_TIMEOUT)
+        self.bot, self.guild_id, self.name = bot, guild_id, name
+        self.content, self.attachments, self.expected = content, attachments, expected
+
+    @discord.ui.button(label=t("action.continue"), style=discord.ButtonStyle.primary)
+    async def confirm(self, interaction, button):
+        if self.is_finished() or interaction.guild_id != self.guild_id:
+            return
+        self.stop()
+        await interaction.response.defer()
+        attachments, self.attachments = self.attachments, []
+        try:
+            uploads = await read_uploads(attachments, self.bot.max_media_bytes)
+        except MediaError as error:
+            await interaction.edit_original_response(
+                content=t(str(error), max_media_mb=self.bot.max_media_mb), view=None
+            )
+            return
+        message = await save_tag(
+            self.bot, interaction, self.name, self.content, uploads, self.expected
+        )
+        await interaction.edit_original_response(content=message, view=None)
+
+    @discord.ui.button(label=t("action.cancel"), style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction, button):
+        self.stop()
+        self.attachments = []
+        await interaction.response.edit_message(content=t("save.cancelled"), view=None)
+
+    async def on_timeout(self):
+        self.attachments = []
+        if self.message:
+            try:
+                await self.message.edit(content=t("create.expired"), view=None)
+            except discord.HTTPException:
+                pass
+
+
+async def confirm_save(bot, interaction, name, content, uploads, expected):
+    view = SaveConfirmation(
+        bot, interaction.user.id, interaction.guild_id, name, content, uploads, expected
+    )
+    await reply(
+        interaction,
+        t("save.confirm_edit" if expected else "save.confirm_create", name=code(name)),
+        view=view,
+    )
+    view.message = await interaction.original_response()
+
+
 def name_candidates(name: str, count: int = 100) -> list[str]:
     match = re.fullmatch(r"(.*?)(\d+)", name, re.DOTALL)
     base, start = (match[1], int(match[2]) + 1) if match else (name, 1)
@@ -461,16 +513,33 @@ class ForceRemove(OwnedView):
 
     @discord.ui.button(label=t("action.continue"), style=discord.ButtonStyle.primary)
     async def confirm(self, interaction, button):
+        if self.is_finished() or interaction.guild_id != self.tag["guild_id"]:
+            return
         self.stop()
-        await self.bot.db.delete(self.tag["id"])
-        self.embed.title = t("remove.force_done")
+        await interaction.response.defer()
+        current = await self.bot.db.get_tag(interaction.guild_id, self.tag["name"])
+        if current is None or current["id"] != self.tag["id"]:
+            await interaction.edit_original_response(
+                content=t("error.tag_changed"), embed=None, view=None
+            )
+            return
+        member_permissions = permissions(interaction)
+        if current["owner_id"] != interaction.user.id and not (
+            member_permissions.manage_guild or member_permissions.ban_members
+        ):
+            await interaction.edit_original_response(
+                content=t("error.not_owner"), embed=None, view=None
+            )
+            return
+        await self.bot.db.delete_matching(interaction.guild_id, [current["id"]])
+        self.embed.title = t("result.removed", name=code(current["name"]))
         self.embed.colour = discord.Colour.green()
-        await interaction.response.edit_message(embed=self.embed, view=None)
+        await interaction.edit_original_response(embed=self.embed, view=None)
 
     @discord.ui.button(label=t("action.cancel"), style=discord.ButtonStyle.danger)
     async def cancel(self, interaction, button):
         self.stop()
-        self.embed.title = t("remove.force_cancelled")
+        self.embed.title = t("remove.cancelled")
         self.embed.colour = discord.Colour.red()
         await interaction.response.edit_message(embed=self.embed, view=None)
 
@@ -497,9 +566,28 @@ class RemoveAll(OwnedView):
 
     @discord.ui.button(label=t("action.continue"), style=discord.ButtonStyle.primary)
     async def confirm(self, interaction, button):
+        if self.is_finished() or interaction.guild_id != self.guild_id:
+            return
         self.stop()
-        count = await self.bot.db.delete_matching(self.guild_id, [tag["id"] for tag in self.tags])
-        await interaction.response.edit_message(
+        await interaction.response.defer()
+        if not permissions(interaction).administrator and self.options["userId"] != str(
+            interaction.user.id
+        ):
+            await interaction.edit_original_response(content=t("error.remove_others"), view=None)
+            return
+        tag_ids = [tag["id"] for tag in self.tags]
+        if permissions(interaction).administrator:
+            count = await self.bot.db.delete_matching(self.guild_id, tag_ids)
+        else:
+            count = await self.bot.db.delete_matching_owned(
+                self.guild_id, tag_ids, interaction.user.id
+            )
+            if count is None:
+                await interaction.edit_original_response(
+                    content=t("error.remove_others"), view=None
+                )
+                return
+        await interaction.edit_original_response(
             content=t("remove_all.done", count=f"{count:,}", scope=self.scope), view=None
         )
 
@@ -619,11 +707,10 @@ async def prefix_reply(message: discord.Message, content: str, **kwargs):
 
 
 async def prefix_uploads(bot, message: discord.Message):
-    try:
-        return await read_uploads(message.attachments, bot.max_media_bytes)
-    except MediaError as error:
-        await prefix_reply(message, t(str(error), max_media_mb=bot.max_media_mb))
+    if any(not 0 < attachment.size <= bot.max_media_bytes for attachment in message.attachments):
+        await prefix_reply(message, t("error.media_size", max_media_mb=bot.max_media_mb))
         return None
+    return message.attachments
 
 
 async def handle_prefix_message(bot, message: discord.Message) -> bool:
@@ -695,8 +782,11 @@ async def prefix_create(bot, message: discord.Message, value: str):
         return
     uploads = await prefix_uploads(bot, message)
     if uploads is not None:
-        await prefix_reply(
-            message, await save_tag(bot, message_event(message), name, content, uploads, None)
+        view = SaveConfirmation(
+            bot, message.author.id, message.guild.id, name, content, uploads, None
+        )
+        view.message = await prefix_reply(
+            message, t("save.confirm_create", name=code(name)), view=view
         )
 
 
@@ -717,8 +807,12 @@ async def prefix_edit(bot, message: discord.Message, value: str):
         return
     uploads = await prefix_uploads(bot, message)
     if uploads is not None:
-        result = await save_tag(bot, event, tag["name"], parsed[1].strip(), uploads, tag)
-        await prefix_reply(message, result)
+        view = SaveConfirmation(
+            bot, message.author.id, message.guild.id, tag["name"], parsed[1].strip(), uploads, tag
+        )
+        view.message = await prefix_reply(
+            message, t("save.confirm_edit", name=code(tag["name"])), view=view
+        )
 
 
 async def prefix_alias(bot, message: discord.Message, value: str):
@@ -853,16 +947,14 @@ async def prefix_remove(bot, message: discord.Message, value: str):
     tag = await prefix_find(bot, message, parsed[0])
     if tag is None:
         return
-    if tag["owner_id"] == message.author.id:
-        await bot.db.delete(tag["id"])
-        await prefix_reply(message, t("result.removed", name=code(tag["name"])))
-        return
     member_permissions = message.author.guild_permissions
-    if not (member_permissions.manage_guild or member_permissions.ban_members):
+    if tag["owner_id"] != message.author.id and not (
+        member_permissions.manage_guild or member_permissions.ban_members
+    ):
         await prefix_reply(message, t("error.not_owner"))
         return
     embed = discord.Embed(
-        title=t("remove.force_title"),
+        title=t("remove.confirm_title"),
         description=t("remove.force_body", name=code(tag["name"])),
         colour=discord.Colour.blurple(),
     )
@@ -1020,9 +1112,7 @@ def register_commands(bot):
         if tag:
             await execute(bot, interaction, tag, arguments or "", attachment)
 
-    @group.command(name="create", description=t("command.create"))
-    @app_commands.describe(name=t("option.new_name"), content=t("option.content"))
-    async def create(interaction: discord.Interaction, name: str, content: str | None = None):
+    async def create_tag(interaction: discord.Interaction, name: str, content: str | None = None):
         name = valid_name(name)
         if name is None:
             await reply(interaction, t("error.name", limit=MAX_NAME))
@@ -1062,7 +1152,17 @@ def register_commands(bot):
             )
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
-        await reply(interaction, await save_tag(bot, interaction, name, content.strip(), [], None))
+        await confirm_save(bot, interaction, name, content.strip(), [], None)
+
+    @group.command(name="create", description=t("command.create"))
+    @app_commands.describe(name=t("option.new_name"), content=t("option.content"))
+    async def create(interaction: discord.Interaction, name: str, content: str | None = None):
+        await create_tag(interaction, name, content)
+
+    @group.command(name="add", description=t("command.create"))
+    @app_commands.describe(name=t("option.new_name"), content=t("option.content"))
+    async def add(interaction: discord.Interaction, name: str, content: str | None = None):
+        await create_tag(interaction, name, content)
 
     @group.command(name="edit", description=t("command.edit"))
     @app_commands.describe(name=t("option.name"), content=t("option.content"))
@@ -1083,8 +1183,7 @@ def register_commands(bot):
             )
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
-        message = await save_tag(bot, interaction, tag["name"], content.strip(), [], tag)
-        await reply(interaction, message)
+        await confirm_save(bot, interaction, tag["name"], content.strip(), [], tag)
 
     @group.command(name="alias", description=t("command.alias"))
     @app_commands.describe(tag=t("option.alias_target"), name=t("option.new_name"))
@@ -1352,16 +1451,14 @@ def register_commands(bot):
         tag = await find(interaction, name)
         if tag is None:
             return
-        if tag["owner_id"] == interaction.user.id:
-            await bot.db.delete(tag["id"])
-            await reply(interaction, t("result.removed", name=code(tag["name"])))
-            return
         member_permissions = permissions(interaction)
-        if not (member_permissions.manage_guild or member_permissions.ban_members):
+        if tag["owner_id"] != interaction.user.id and not (
+            member_permissions.manage_guild or member_permissions.ban_members
+        ):
             await reply(interaction, t("error.not_owner"))
             return
         embed = discord.Embed(
-            title=t("remove.force_title"),
+            title=t("remove.confirm_title"),
             description=t("remove.force_body", name=code(tag["name"])),
             colour=discord.Colour.blurple(),
         )
