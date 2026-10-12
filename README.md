@@ -46,8 +46,8 @@ delete button is left out.
 - `/tag create name [content]`: creates a tag. Without `content`, a form opens with
   multi-line content and up to 10 file uploads. Creating or editing a tag always
   requires confirmation before saving, including after submitting a form. If the name
-  is taken, nothing is overwritten: the bot asks whether to overwrite it (only offered to the tag's owner
-  and server administrators) or create the tag under the first free suggested name:
+  is taken, nothing is overwritten: the bot asks whether to overwrite it (only offered
+  to the tag's owner and server administrators) or create the tag under the first free suggested name:
   `name` suggests `name1`, and a name ending in a number counts up, so `name1`
   suggests `name2`.
 - `/tag edit name [content]`: edits a tag, the same way. Owners can edit their own

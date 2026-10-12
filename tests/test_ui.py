@@ -655,7 +655,7 @@ async def test_remove_all_deletes_only_the_confirmed_guild_snapshot(administrato
     )
     view = event.followup.send.await_args.kwargs["view"]
     bot.db.delete_matching.assert_not_awaited()
-    bot.db.search.return_value = rows + [tag(id=12, name="new")]
+    bot.db.search.return_value = rows + [tag(id=12, name="new", owner_id=3)]
     click = button_event()
     click.user.guild_permissions = discord.Permissions(administrator=administrator)
     await view.confirm.callback(click)
