@@ -79,6 +79,7 @@ def prefix_message(content, user_id=2, attachments=None, **permissions):
         guild=guild,
         channel=SimpleNamespace(send=AsyncMock(return_value=AsyncMock())),
         attachments=attachments or [],
+        reference=None,
         reply=AsyncMock(return_value=AsyncMock()),
     )
 
@@ -202,6 +203,54 @@ async def test_prefix_create_edit_alias_and_rename(monkeypatch):
     rename = prefix_message('.t rename hello "new name"')
     await ui.handle_prefix_message(bot, rename)
     bot.db.rename.assert_awaited_once_with(10, "new name")
+    await bot.close()
+
+
+@pytest.mark.parametrize("command_name", ["add", "create"])
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize("content", ["Original message", ""])
+async def test_prefix_create_from_reply(command_name, cached, content):
+    bot = stats_bot(get_tag=AsyncMock(return_value=None), create_tag=AsyncMock())
+    attachment = SimpleNamespace(size=4, filename="../photo.png", read=AsyncMock(return_value=b"data"))
+    target = prefix_message(content, user_id=3, attachments=[attachment])
+    message = prefix_message(f'.t {command_name} "two words"')
+    message.reference = SimpleNamespace(
+        resolved=target if cached else None, message_id=100, channel_id=5, guild_id=1
+    )
+    message.channel.id = 5
+    message.channel.fetch_message = AsyncMock(return_value=target)
+
+    await ui.handle_prefix_message(bot, message)
+
+    bot.db.create_tag.assert_not_awaited()
+    attachment.read.assert_not_awaited()
+    if cached:
+        message.channel.fetch_message.assert_not_awaited()
+    else:
+        message.channel.fetch_message.assert_awaited_once_with(100)
+    view = message.reply.await_args.kwargs["view"]
+    assert view.owner_id == 2
+    click = button_event()
+    await view.confirm.callback(click)
+    args = bot.db.create_tag.await_args.args
+    assert args[1:] == (
+        1,
+        "two words",
+        "\n".join(part for part in (content, "{attach:photo.png}") if part),
+        2,
+        {"photo.png": b"data"},
+    )
+    await bot.close()
+
+
+async def test_prefix_create_from_text_only_reply():
+    bot = stats_bot(get_tag=AsyncMock(return_value=None), create_tag=AsyncMock())
+    message = prefix_message(".tag add hello")
+    message.reference = SimpleNamespace(resolved=prefix_message("original text"), message_id=100)
+    await ui.handle_prefix_message(bot, message)
+    view = message.reply.await_args.kwargs["view"]
+    await view.confirm.callback(button_event())
+    assert bot.db.create_tag.await_args.args[3] == "original text"
     await bot.close()
 
 
