@@ -706,11 +706,12 @@ async def prefix_reply(message: discord.Message, content: str, **kwargs):
     )
 
 
-async def prefix_uploads(bot, message: discord.Message):
-    if any(not 0 < attachment.size <= bot.max_media_bytes for attachment in message.attachments):
+async def prefix_uploads(bot, message: discord.Message, attachments=None):
+    attachments = message.attachments if attachments is None else attachments
+    if any(not 0 < attachment.size <= bot.max_media_bytes for attachment in attachments):
         await prefix_reply(message, t("error.media_size", max_media_mb=bot.max_media_mb))
         return None
-    return message.attachments
+    return attachments
 
 
 async def handle_prefix_message(bot, message: discord.Message) -> bool:
@@ -770,8 +771,8 @@ async def prefix_show(bot, message: discord.Message, name: str, arguments: str):
 
 async def prefix_create(bot, message: discord.Message, value: str):
     parsed = prefix_argument(value)
-    if parsed is None or not parsed[1].strip():
-        await prefix_reply(message, t("prefix.usage", usage=".t create <tag> <content>"))
+    if parsed is None:
+        await prefix_reply(message, t("prefix.usage", usage=".t create <tag> [content]"))
         return
     name, content = clean_name(parsed[0]), parsed[1].strip()
     if not 0 < len(name) <= MAX_NAME:
@@ -780,7 +781,33 @@ async def prefix_create(bot, message: discord.Message, value: str):
     if await bot.db.get_tag(message.guild.id, name):
         await prefix_reply(message, t("error.tag_exists"))
         return
-    uploads = await prefix_uploads(bot, message)
+    source = message
+    if not content and not message.attachments and message.reference:
+        reference = message.reference
+        if reference.type == discord.MessageReferenceType.default:
+            source = reference.resolved
+            if source is None:
+                try:
+                    source = await message.channel.fetch_message(reference.message_id)
+                except discord.HTTPException:
+                    await prefix_reply(message, t("error.create_reply"))
+                    return
+            if isinstance(source, discord.DeletedReferencedMessage):
+                await prefix_reply(message, t("error.create_reply"))
+                return
+            urls = []
+            first_url = re.search(r"https?://[^\s<>]+", source.content)
+            if first_url:
+                urls.append(first_url[0])
+            for embed in source.embeds:
+                for media in (embed.image, embed.thumbnail, embed.video):
+                    if media.url:
+                        urls.append(media.url)
+            content = "\n".join(dict.fromkeys(urls))
+    if not content and not source.attachments:
+        await prefix_reply(message, t("prefix.usage", usage=".t create <tag> [content]"))
+        return
+    uploads = await prefix_uploads(bot, message, source.attachments)
     if uploads is not None:
         view = SaveConfirmation(
             bot, message.author.id, message.guild.id, name, content, uploads, None

@@ -106,6 +106,7 @@
   "error.alias_regular": "Cannot edit a regular tag to be an alias tag.",
   "error.name": "Tag names must be between 1 and {limit} characters.",
   "error.empty_content": "Must have some sort of content for the tag!",
+  "error.create_reply": "Unable to read the replied-to message. It may have been deleted or be inaccessible.",
   "error.content_length": "Tag content cannot be longer than {limit} characters.",
   "error.file_count": "A tag can store at most {limit} files.",
   "error.missing_files": "These files are not stored on this tag: {files}",
