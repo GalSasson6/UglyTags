@@ -26,6 +26,11 @@ delete button is left out.
   and `.t remove`: provide the original bot's core chat management commands. `.t add`,
   `.t delete`, `.t owner`, and `.t raw` remain aliases. Create, edit, and remove always
   ask for confirmation. Create and edit store files attached to the command message.
+  Reply with `.t add name` or `.t create name` (without content or command attachments)
+  to create a tag from the replied message's attachments, first text link, and embed
+  media links. Plain text alone is not copied, matching NotSoBot. Attachments are stored
+  with the tag; links remain links rather than being downloaded from external hosts.
+  Explicit content or command attachments take priority over the reply.
   Use the slash commands for forms, filters, imports, exports, groups,
   statistics, and pruning.
 - **Apps > tag reply**: right-click a message (or long-press on mobile)
