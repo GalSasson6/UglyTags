@@ -24,8 +24,9 @@ delete button is left out.
   original `.t show`/`.tag show` aliases also work.
 - `.t create`, `.t edit`, `.t alias`, `.t rename`, `.t info`, `.t list`, `.t random`,
   and `.t remove`: provide the original bot's core chat management commands. `.t add`,
-  `.t owner`, and `.t raw` remain aliases. Create and edit store files attached to the
-  command message. Use the slash commands for forms, filters, imports, exports, groups,
+  `.t delete`, `.t owner`, and `.t raw` remain aliases. Create, edit, and remove always
+  ask for confirmation. Create and edit store files attached to the command message.
+  Use the slash commands for forms, filters, imports, exports, groups,
   statistics, and pruning.
 - **Apps > tag reply**: right-click a message (or long-press on mobile)
   and choose this shortcut (prefixed with a speech-bubble icon). A private form offers your 25 most recently used tags in
@@ -43,8 +44,9 @@ delete button is left out.
   The reply card stays on every pagination page and component update; tags that
   leave no room for it report an error and can still be run with `/t`.
 - `/tag create name [content]`: creates a tag. Without `content`, a form opens with
-  multi-line content and up to 10 file uploads. If the name is taken, nothing is
-  overwritten: the bot asks whether to overwrite it (only offered to the tag's owner
+  multi-line content and up to 10 file uploads. Creating or editing a tag always
+  requires confirmation before saving, including after submitting a form. If the name
+  is taken, nothing is overwritten: the bot asks whether to overwrite it (only offered to the tag's owner
   and server administrators) or create the tag under the first free suggested name:
   `name` suggests `name1`, and a name ending in a number counts up, so `name1`
   suggests `name2`.
@@ -61,7 +63,7 @@ delete button is left out.
   matching tag.
 - `/tag list server [content] [name] [user]` and `/tag list user [user] [content] [name]`:
   list tags. Filters match case-insensitive substrings.
-- `/tag remove tag name`: removes a tag.
+- `/tag remove tag name`: removes a tag after confirmation, even for its owner.
 - `/tag remove all [content] [name] [user]`: removes matching tags after confirmation,
   with an option to export them first.
 - `/tag export [content] [name] [user]`: exports matching tags as JSON.

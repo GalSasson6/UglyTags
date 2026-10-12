@@ -41,6 +41,7 @@ def interaction(user_id=2, **permissions):
     response = SimpleNamespace(
         send_message=AsyncMock(),
         send_modal=AsyncMock(),
+        edit_message=AsyncMock(),
         defer=AsyncMock(side_effect=defer),
         is_done=lambda: state["done"],
     )
@@ -177,12 +178,19 @@ async def test_prefix_create_edit_alias_and_rename(monkeypatch):
 
     create = prefix_message(".t create hello created content")
     await ui.handle_prefix_message(bot, create)
+    save.assert_not_awaited()
+    create_view = create.reply.await_args.kwargs["view"]
+    click = button_event()
+    await create_view.confirm.callback(click)
     assert save.await_args_list[0].args[2:5] == ("hello", "created content", [])
-    assert create.reply.await_args.args[0] == "created"
+    assert click.edit_original_response.await_args.kwargs["content"] == "created"
     assert not create.reply.await_args.kwargs["mention_author"]
 
     edit = prefix_message(".t edit hello edited content")
     await ui.handle_prefix_message(bot, edit)
+    assert save.await_count == 1
+    edit_view = edit.reply.await_args.kwargs["view"]
+    await edit_view.confirm.callback(button_event())
     assert save.await_args_list[1].args[2:5] == ("hello", "edited content", [])
     assert save.await_args_list[1].args[5] is row
 
@@ -203,7 +211,7 @@ async def test_prefix_info_list_random_and_remove(monkeypatch):
         file_names=AsyncMock(return_value=[]),
         search=AsyncMock(return_value=[row]),
         random=AsyncMock(return_value=row),
-        delete=AsyncMock(),
+        delete_matching=AsyncMock(return_value=1),
     )
     execute = AsyncMock()
     monkeypatch.setattr(ui, "execute_message", execute)
@@ -224,7 +232,10 @@ async def test_prefix_info_list_random_and_remove(monkeypatch):
 
     remove = prefix_message(".t remove tag hello")
     await ui.handle_prefix_message(bot, remove)
-    bot.db.delete.assert_awaited_once_with(10)
+    bot.db.delete_matching.assert_not_awaited()
+    view = remove.reply.await_args.kwargs["view"]
+    await view.confirm.callback(button_event())
+    bot.db.delete_matching.assert_awaited_once_with(1, [10])
     await bot.close()
 
 
@@ -511,12 +522,174 @@ async def test_create_conflict_without_content_opens_form():
     await bot.close()
 
 
-async def test_create_without_conflict_saves_directly():
+async def test_create_without_conflict_requires_confirmation():
     bot = conflict_bot(None)
     event = interaction()
     await command(bot, "create")(event, "fresh", "body")
+    bot.db.create_tag.assert_not_awaited()
+    view = event.followup.send.await_args.kwargs["view"]
+    click = button_event()
+    await view.confirm.callback(click)
     assert bot.db.create_tag.await_args.args[2] == "fresh"
-    assert "created" in event.followup.send.await_args.args[0]
+    assert "created" in click.edit_original_response.await_args.kwargs["content"]
+    await bot.close()
+
+
+@pytest.mark.parametrize("editing", [False, True])
+@pytest.mark.parametrize("form", [False, True])
+async def test_slash_save_confirmation(editing, form, monkeypatch):
+    row = tag() if editing else None
+    bot = conflict_bot(row)
+    save = AsyncMock(return_value="saved")
+    monkeypatch.setattr(ui, "save_tag", save)
+    uploads = [("file.txt", b"data")] if form else []
+    monkeypatch.setattr(ui, "read_uploads", AsyncMock(return_value=uploads))
+    event = interaction()
+    await command(bot, "edit" if editing else "create")(event, "hello", None if form else "body")
+    if form:
+        modal = event.response.send_modal.await_args.args[0]
+        modal.content._value = "body"
+        submit = interaction()
+        await modal.on_submit(submit)
+        event = submit
+    save.assert_not_awaited()
+    view = event.followup.send.await_args.kwargs["view"]
+    assert isinstance(view, ui.SaveConfirmation)
+    click = button_event()
+    await view.confirm.callback(click)
+    save.assert_awaited_once_with(bot, click, "hello", "body", uploads, row)
+    await view.confirm.callback(click)
+    assert save.await_count == 1
+    await bot.close()
+
+
+@pytest.mark.parametrize("editing", [False, True])
+@pytest.mark.parametrize("action", ["cancel", "timeout"])
+async def test_save_cancellation_and_timeout_do_not_write(editing, action, monkeypatch):
+    save = AsyncMock()
+    monkeypatch.setattr(ui, "save_tag", save)
+    view = ui.SaveConfirmation(None, 2, 1, "hello", "body", [], tag() if editing else None)
+    view.message = AsyncMock()
+    if action == "cancel":
+        await view.cancel.callback(button_event())
+        await view.confirm.callback(button_event())
+    else:
+        await view.on_timeout()
+        assert view.message.edit.await_args.kwargs["view"] is None
+    save.assert_not_awaited()
+    view.stop()
+
+
+async def test_save_confirmation_checks_owner_and_current_permissions():
+    bot = conflict_bot(tag(owner_id=3))
+    view = ui.SaveConfirmation(bot, 2, 1, "hello", "body", [], tag(owner_id=3))
+    assert not await view.interaction_check(button_event(3))
+    await view.confirm.callback(button_event())
+    bot.db.save_content.assert_not_awaited()
+    bot.db.create_tag.assert_not_awaited()
+    await bot.close()
+
+
+@pytest.mark.parametrize("prefix", [False, True])
+@pytest.mark.parametrize("owner_id", [2, 3])
+async def test_delete_always_confirms(prefix, owner_id):
+    bot = stats_bot(
+        get_tag=AsyncMock(return_value=tag(owner_id=owner_id)),
+        delete_matching=AsyncMock(return_value=1),
+    )
+    if prefix:
+        event = prefix_message('.t delete "hello"', ban_members=True)
+        await ui.handle_prefix_message(bot, event)
+        view = event.reply.await_args.kwargs["view"]
+    else:
+        event = interaction(ban_members=True)
+        await command(bot, "remove", "tag")(event, "hello")
+        view = event.response.send_message.await_args.kwargs["view"]
+    bot.db.delete_matching.assert_not_awaited()
+    click = button_event()
+    click.user.guild_permissions = discord.Permissions(ban_members=True)
+    await view.confirm.callback(click)
+    bot.db.delete_matching.assert_awaited_once_with(1, [10])
+    await view.confirm.callback(click)
+    assert bot.db.delete_matching.await_count == 1
+    await bot.close()
+
+
+@pytest.mark.parametrize("action", ["cancel", "timeout", "lost_permission", "replaced"])
+async def test_delete_does_not_remove_without_valid_confirmation(action):
+    bot = stats_bot(
+        get_tag=AsyncMock(return_value=tag(owner_id=3)),
+        delete_matching=AsyncMock(),
+    )
+    event = prefix_message(".t delete hello", ban_members=True)
+    await ui.handle_prefix_message(bot, event)
+    view = event.reply.await_args.kwargs["view"]
+    click = button_event()
+    if action == "cancel":
+        await view.cancel.callback(click)
+        await view.confirm.callback(click)
+    elif action == "timeout":
+        await view.on_timeout()
+        assert view.message.edit.await_args.kwargs["view"] is None
+    else:
+        if action == "replaced":
+            bot.db.get_tag.return_value = tag(id=11)
+        await view.confirm.callback(click)
+        assert click.edit_original_response.await_args.kwargs["view"] is None
+    bot.db.delete_matching.assert_not_awaited()
+    view.stop()
+    await bot.close()
+
+
+@pytest.mark.parametrize("administrator", [False, True])
+async def test_remove_all_deletes_only_the_confirmed_guild_snapshot(administrator):
+    rows = [tag(), tag(id=11, name="second")]
+    bot = stats_bot(
+        search=AsyncMock(return_value=rows),
+        delete_matching=AsyncMock(return_value=2),
+    )
+    event = interaction(administrator=administrator)
+    await command(bot, "remove", "all")(event, None, None, None)
+    bot.db.search.assert_awaited_once_with(
+        1, name=None, content=None, owner_id=None if administrator else 2
+    )
+    view = event.followup.send.await_args.kwargs["view"]
+    bot.db.delete_matching.assert_not_awaited()
+    bot.db.search.return_value = rows + [tag(id=12, name="new")]
+    click = button_event()
+    click.user.guild_permissions = discord.Permissions(administrator=administrator)
+    await view.confirm.callback(click)
+    click.response.defer.assert_awaited_once()
+    bot.db.delete_matching.assert_awaited_once_with(1, [10, 11])
+    assert "removed 2 tags" in click.edit_original_response.await_args.kwargs["content"]
+    await view.confirm.callback(click)
+    assert bot.db.delete_matching.await_count == 1
+    await bot.close()
+
+
+@pytest.mark.parametrize("action", ["cancel", "timeout", "lost_permission", "owner_changed"])
+async def test_remove_all_rechecks_permissions_and_can_cancel(action):
+    bot = stats_bot(
+        search=AsyncMock(return_value=[tag()]),
+        delete_matching=AsyncMock(),
+    )
+    event = interaction(administrator=action != "owner_changed")
+    await command(bot, "remove", "all")(event, None, None, None)
+    view = event.followup.send.await_args.kwargs["view"]
+    click = button_event()
+    if action == "cancel":
+        await view.cancel.callback(click)
+        await view.confirm.callback(click)
+    elif action == "timeout":
+        await view.on_timeout()
+        assert view.message.edit.await_args.kwargs["view"] is None
+    else:
+        if action == "owner_changed":
+            bot.db.search.return_value = [tag(owner_id=3)]
+        await view.confirm.callback(click)
+        assert "Not enough permissions" in click.edit_original_response.await_args.kwargs["content"]
+    bot.db.delete_matching.assert_not_awaited()
+    view.stop()
     await bot.close()
 
 
