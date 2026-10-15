@@ -411,17 +411,28 @@ class SaveConfirmation(OwnedView):
         super().__init__(owner_id, CONFIRM_TIMEOUT)
         self.bot, self.guild_id, self.name = bot, guild_id, name
         self.content, self.attachments, self.expected = content, attachments, expected
+        if expected is not None:
+            self.remove_item(self.rename)
 
     @discord.ui.button(label=t("action.continue"), style=discord.ButtonStyle.primary)
     async def confirm(self, interaction, button):
         if self.is_finished() or interaction.guild_id != self.guild_id:
             await interaction.response.defer()
             return
+        if self.content is None:
+            await interaction.response.send_modal(
+                TagModal(self.bot, self.guild_id, self.owner_id, self.name, self.expected)
+            )
+            return
         self.stop()
         attachments, self.attachments = self.attachments, []
         await finish_save(
             self.bot, interaction, self.name, self.content, attachments, self.expected
         )
+
+    @discord.ui.button(label=t("action.rename"), style=discord.ButtonStyle.secondary)
+    async def rename(self, interaction, button):
+        await interaction.response.send_modal(RenameModal(self, self.name))
 
     @discord.ui.button(label=t("action.cancel"), style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction, button):
@@ -460,14 +471,65 @@ def name_candidates(name: str, count: int = 100) -> list[str]:
     return candidates
 
 
-async def available_name(bot, guild_id: int, name: str) -> str:
+async def available_names(bot, guild_id: int, name: str, count: int = 2) -> list[str]:
     candidates = name_candidates(name)
     taken = await bot.db.taken_names(guild_id, candidates)
-    for candidate in candidates:
-        if candidate.lower() not in taken:
-            return candidate
-    suffix = str(new_id())
-    return name[: MAX_NAME - len(suffix)] + suffix
+    free = [candidate for candidate in candidates if candidate.lower() not in taken][:count]
+    if not free:
+        suffix = str(new_id())
+        free.append(name[: MAX_NAME - len(suffix)] + suffix)
+    return free
+
+
+async def available_name(bot, guild_id: int, name: str) -> str:
+    return (await available_names(bot, guild_id, name, 1))[0]
+
+
+def valid_name(name: str) -> str | None:
+    name = clean_name(name)
+    return name if 0 < len(name) <= MAX_NAME else None
+
+
+class RenameModal(discord.ui.Modal):
+    def __init__(self, source, name: str):
+        super().__init__(title=t("modal.rename")[:45], timeout=CONFIRM_TIMEOUT)
+        self.source = source
+        self.new_name = discord.ui.TextInput(max_length=MAX_NAME, default=name[:MAX_NAME])
+        self.add_item(discord.ui.Label(text=t("modal.name"), component=self.new_name))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await choose_name(self.source, interaction, self.new_name.value)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        await report_error(interaction, error)
+
+
+async def choose_name(old, interaction: discord.Interaction, value: str):
+    name = valid_name(value)
+    if name is None:
+        await reply(interaction, t("error.name", limit=MAX_NAME))
+        return
+    tag = await old.bot.db.get_tag(interaction.guild_id, name)
+    if old.is_finished():
+        await interaction.response.defer()
+        return
+    if tag:
+        text, view = await create_conflict(
+            old.bot, interaction, tag, name, old.content, old.attachments
+        )
+    else:
+        view = SaveConfirmation(
+            old.bot, old.owner_id, interaction.guild_id, name, old.content, old.attachments, None
+        )
+        text = t("save.confirm_create", name=code(name))
+    if old.is_finished():
+        view.stop()
+        await interaction.response.defer()
+        return
+    old.stop()
+    old.attachments = []
+    view.message = old.message
+    await interaction.response.edit_message(content=text, view=view)
 
 
 class CreateConflict(OwnedView):
@@ -476,19 +538,17 @@ class CreateConflict(OwnedView):
         bot,
         owner_id: int,
         existing: dict | None,
-        suggestion: str,
+        name: str,
+        suggestions: list[str],
         content: str | None,
         attachments=(),
     ):
         super().__init__(owner_id, CONFIRM_TIMEOUT)
-        self.bot, self.existing, self.suggestion, self.content = (
-            bot,
-            existing,
-            suggestion,
-            content,
-        )
+        self.bot, self.existing, self.name, self.content = bot, existing, name, content
         self.attachments = list(attachments)
-        self.create_as.label = t("action.create_as", name=suggestion)[:80]
+        self.choose.options = [
+            discord.SelectOption(label=suggestion, value=suggestion) for suggestion in suggestions
+        ]
         if existing is None:
             self.remove_item(self.overwrite)
 
@@ -505,15 +565,19 @@ class CreateConflict(OwnedView):
         attachments, self.attachments = self.attachments, []
         await finish_save(self.bot, interaction, name, self.content, attachments, expected)
 
-    @discord.ui.button(label=t("action.overwrite"), style=discord.ButtonStyle.danger)
+    @discord.ui.select(placeholder=t("action.pick_name"), row=0)
+    async def choose(self, interaction, select):
+        await self.save(interaction, select.values[0], None)
+
+    @discord.ui.button(label=t("action.overwrite"), style=discord.ButtonStyle.danger, row=1)
     async def overwrite(self, interaction, button):
         await self.save(interaction, self.existing["name"], self.existing)
 
-    @discord.ui.button(label="create", style=discord.ButtonStyle.primary)
-    async def create_as(self, interaction, button):
-        await self.save(interaction, self.suggestion, None)
+    @discord.ui.button(label=t("action.custom_name"), style=discord.ButtonStyle.primary, row=1)
+    async def custom_name(self, interaction, button):
+        await interaction.response.send_modal(RenameModal(self, self.name))
 
-    @discord.ui.button(label=t("action.cancel"), style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label=t("action.cancel"), style=discord.ButtonStyle.secondary, row=1)
     async def cancel(self, interaction, button):
         self.stop()
         self.attachments = []
@@ -529,10 +593,10 @@ class CreateConflict(OwnedView):
 
 
 async def create_conflict(bot, event, tag: dict, name: str, content: str | None, attachments=()):
-    suggestion = await available_name(bot, event.guild_id, name)
+    suggestions = await available_names(bot, event.guild_id, name)
     allowed = can_overwrite(event, tag) and not is_group(tag)
     view = CreateConflict(
-        bot, event.user.id, tag if allowed else None, suggestion, content, attachments
+        bot, event.user.id, tag if allowed else None, name, suggestions, content, attachments
     )
     if is_group(tag):
         key = "create.conflict_group"
@@ -541,7 +605,10 @@ async def create_conflict(bot, event, tag: dict, name: str, content: str | None,
     else:
         key = "create.conflict_admin" if allowed else "create.conflict_other"
     text = t(
-        key, name=code(tag["name"]), suggestion=code(suggestion), owner=f"<@{tag['owner_id']}>"
+        key,
+        name=code(tag["name"]),
+        suggestion=code(suggestions[0]),
+        owner=f"<@{tag['owner_id']}>",
     )
     return text, view
 
@@ -932,15 +999,15 @@ async def prefix_create(bot, message: discord.Message, value: str):
             if isinstance(source, discord.DeletedReferencedMessage):
                 await prefix_reply(message, t("error.create_reply"))
                 return
-            urls = []
-            first_url = re.search(r"https?://[^\s<>]+", source.content)
-            if first_url:
-                urls.append(first_url[0])
-            for embed in source.embeds:
-                for media in (embed.image, embed.thumbnail, embed.video):
-                    if media.url:
-                        urls.append(media.url)
-            content = "\n".join(dict.fromkeys(urls))
+            text = "" if source.attachments else source.content.strip()
+            urls = [
+                media.url
+                for embed in source.embeds
+                for media in (embed.image, embed.thumbnail, embed.video)
+                if media.url and media.url not in text
+            ]
+            parts = [text, *dict.fromkeys(urls)]
+            content = "\n".join(part for part in parts if part)
     if not content and not source.attachments:
         await prefix_reply(message, t("prefix.usage", usage=".t create <tag> [content]"))
         return
@@ -1276,10 +1343,6 @@ def register_commands(bot):
         if tag is None:
             await reply(interaction, t("error.unknown_tag"))
         return tag
-
-    def valid_name(name: str) -> str | None:
-        name = clean_name(name)
-        return name if 0 < len(name) <= MAX_NAME else None
 
     @bot.tree.command(name="t", description=t("command.show"))
     @app_commands.guild_only()
