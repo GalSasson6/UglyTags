@@ -26,6 +26,8 @@ TAG_COLUMNS = """
 """
 TAG_FROM = "tags t LEFT JOIN tags r ON r.id = t.reference_id"
 MAX_STORAGE_AMOUNT = 5
+SIMILARITY = 0.3
+WORD_SIMILARITY = 0.5
 MAX_GROUP_MEMBERS = 100
 
 
@@ -54,9 +56,17 @@ def like_pattern(value: str) -> str:
     return f"%{escaped}%"
 
 
-def filters(guild_id: int, name=None, content=None, owner_id=None) -> tuple[str, list]:
+def filters(
+    guild_id: int, name=None, content=None, owner_id=None, similar=False
+) -> tuple[str, list]:
     clauses, params = ["t.guild_id = %s"], [guild_id]
-    if name:
+    if name and similar:
+        clauses.append(
+            f"""(t.name ILIKE %s OR word_similarity(%s, t.name) >= {WORD_SIMILARITY}
+                OR similarity(t.name, %s) > {SIMILARITY})"""
+        )
+        params += [like_pattern(name), name, name]
+    elif name:
         clauses.append("t.name ILIKE %s")
         params.append(like_pattern(name))
     if content:
@@ -98,6 +108,16 @@ class Database:
             (guild_id, name),
         )
         return await cursor.fetchone()
+
+    async def similar_names(self, guild_id: int, name: str, limit: int = 3) -> list[str]:
+        cursor = await self.execute(
+            f"""SELECT name FROM (
+                    SELECT name, uses, similarity(name, %s) AS score FROM tags WHERE guild_id = %s
+                ) s WHERE score > {SIMILARITY} ORDER BY score DESC, uses DESC, lower(name)
+                LIMIT %s""",
+            (name, guild_id, limit),
+        )
+        return [row["name"] for row in await cursor.fetchall()]
 
     async def get_tag_by_id(self, tag_id: int):
         cursor = await self.execute(
@@ -169,10 +189,15 @@ class Database:
     async def delete(self, tag_id: int):
         await self.execute("DELETE FROM tags WHERE id = %s", (tag_id,))
 
-    async def search(self, guild_id: int, *, name=None, content=None, owner_id=None):
-        where, params = filters(guild_id, name, content, owner_id)
+    async def search(self, guild_id: int, *, name=None, content=None, owner_id=None, similar=False):
+        where, params = filters(guild_id, name, content, owner_id, similar)
+        order = "lower(t.name)"
+        if name and similar:
+            # Substring matches first, then the closest similar names.
+            order = f"t.name NOT ILIKE %s, word_similarity(%s, t.name) DESC, {order}"
+            params += [like_pattern(name), name]
         cursor = await self.execute(
-            f"SELECT {TAG_COLUMNS} FROM {TAG_FROM} WHERE {where} ORDER BY lower(t.name)", params
+            f"SELECT {TAG_COLUMNS} FROM {TAG_FROM} WHERE {where} ORDER BY {order}", params
         )
         return await cursor.fetchall()
 

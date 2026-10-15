@@ -27,7 +27,7 @@ async def db():
     schema = "test_" + uuid.uuid4().hex
     connection = await psycopg.AsyncConnection.connect(url, autocommit=True)
     await connection.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
-    database = Database(make_conninfo(url, options=f"-c search_path={schema}"))
+    database = Database(make_conninfo(url, options=f"-c search_path={schema},public"))
     try:
         await database.open()
         await database.open()
@@ -100,6 +100,30 @@ async def test_aliases_follow_and_cascade(db):
     await db.delete(tag_id)
     assert await db.get_tag(1, "again") is None
     assert await db.get_tag(1, "short") is not None
+
+
+async def test_search_can_include_similar_names(db):
+    for guild_id, name, owner in (
+        (1, "the helo", 7),
+        (1, "hello world", 7),
+        (1, "hello there", 8),
+        (1, "banana", 7),
+        (2, "hello", 7),
+    ):
+        await db.create_tag(new_id(), guild_id, name, "body", owner)
+    assert [tag["name"] for tag in await db.search(1, name="helo")] == ["the helo"]
+    similar = await db.search(1, name="helo", similar=True)
+    assert [tag["name"] for tag in similar] == ["the helo", "hello there", "hello world"]
+    owned = await db.search(1, name="helo", owner_id=7, similar=True)
+    assert [tag["name"] for tag in owned] == ["the helo", "hello world"]
+
+
+async def test_similar_names_suggests_close_tags_in_the_guild(db):
+    for guild_id, name in ((1, "hello"), (1, "Help"), (1, "world"), (2, "hellos")):
+        await db.create_tag(new_id(), guild_id, name, "body", 7)
+    assert await db.similar_names(1, "helo") == ["hello", "Help"]
+    assert await db.similar_names(1, "HELLO", limit=1) == ["hello"]
+    assert await db.similar_names(1, "zzzz") == []
 
 
 async def test_search_random_autocomplete_and_bulk_delete(db):
@@ -257,7 +281,7 @@ async def test_migrates_version_one_schema():
     schema = "test_" + uuid.uuid4().hex
     connection = await psycopg.AsyncConnection.connect(url, autocommit=True)
     await connection.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
-    conninfo = make_conninfo(url, options=f"-c search_path={schema}")
+    conninfo = make_conninfo(url, options=f"-c search_path={schema},public")
     try:
         version_one = (
             files("uglytags").joinpath("schema.sql").read_text().split("-- Migration 2")[0]

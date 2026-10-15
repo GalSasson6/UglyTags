@@ -445,7 +445,70 @@ async def test_prefix_search_matches_server_tag_names():
     bot.db.search = AsyncMock(return_value=[])
     missing = prefix_message(".t search nothing")
     await ui.handle_prefix_message(bot, missing)
+    bot.db.search.assert_awaited_with(1, name="nothing", similar=True)
     assert missing.reply.await_args.args[0] == ui.t("error.no_matching_tags")
+    await bot.close()
+
+
+async def test_prefix_search_offers_similar_names():
+    bot = stats_bot(search=AsyncMock(side_effect=[[tag()], [tag(), tag(id=11, name="help")]]))
+    message = prefix_message(".t search hel")
+    await ui.handle_prefix_message(bot, message)
+    view = message.reply.await_args.kwargs["view"]
+    assert isinstance(view, ui.SearchView)
+    assert [item.label for item in view.children] == [ui.t("action.similar")]
+
+    click = interaction()
+    click.edit_original_response = AsyncMock()
+    await view.similar.callback(click)
+    click.response.defer.assert_awaited_once()
+    bot.db.search.assert_awaited_with(1, name="hel", similar=True)
+    embed = click.edit_original_response.await_args.kwargs["embed"]
+    assert embed.title == "Guild's tags (2)"
+    assert "`help`" in embed.description
+    assert ui.t("list.similar") in embed.footer.text
+
+    bot.db.search = AsyncMock(side_effect=[[tag()], [tag()]])
+    message = prefix_message(".t search hello")
+    await ui.handle_prefix_message(bot, message)
+    click = interaction()
+    click.edit_original_response = AsyncMock()
+    await message.reply.await_args.kwargs["view"].similar.callback(click)
+    embed = click.edit_original_response.await_args.kwargs["embed"]
+    assert ui.t("list.no_similar") in embed.footer.text
+    await bot.close()
+
+
+async def test_slash_search_and_unknown_tag_suggest_similar_names():
+    bot = stats_bot(
+        search=AsyncMock(side_effect=[[], [tag(name="hello world")]]),
+        get_tag=AsyncMock(return_value=None),
+        similar_names=AsyncMock(return_value=["hello"]),
+    )
+    event = stats_event()
+    await command(bot, "list", "server")(event, name="helo")
+    bot.db.search.assert_awaited_with(1, name="helo", content=None, owner_id=None, similar=True)
+    sent = event.followup.send.await_args.kwargs
+    assert sent["embed"].title == "Server's tags (1)"
+    assert ui.t("list.similar") in sent["embed"].footer.text
+
+    event = stats_event()
+    await bot.tree.get_command("t").callback(event, "helo")
+    bot.db.similar_names.assert_awaited_once_with(1, "helo")
+    assert event.response.send_message.await_args.args[0] == ui.t(
+        "error.unknown_tag_suggest", names="`hello`"
+    )
+    await bot.close()
+
+
+async def test_empty_search_shows_similar_names():
+    bot = stats_bot(search=AsyncMock(side_effect=[[], [tag(name="hello world")]]))
+    message = prefix_message(".t search helo")
+    await ui.handle_prefix_message(bot, message)
+    embed = message.reply.await_args.kwargs["embed"]
+    assert "`hello world`" in embed.description
+    assert ui.t("list.similar") in embed.footer.text
+    assert message.reply.await_args.kwargs["view"] is discord.utils.MISSING
     await bot.close()
 
 
@@ -1316,6 +1379,7 @@ def test_format_size():
 
 def stats_bot(**methods):
     bot = UglyTags("postgresql://localhost/test")
+    methods.setdefault("similar_names", AsyncMock(return_value=[]))
     bot.db = SimpleNamespace(close=AsyncMock(), **methods)
     return bot
 
@@ -1478,6 +1542,20 @@ async def test_info_previews_privately_without_counting_a_use():
     assert sent["content"] == "crispy strips"
     assert sent["embeds"][0].title == "bacon"
     assert "`a.mp4`" in sent["embeds"][0].fields[0].value
+    await bot.close()
+
+
+async def test_unknown_tag_suggests_similar_names():
+    bot = stats_bot(
+        get_tag=AsyncMock(return_value=None),
+        similar_names=AsyncMock(return_value=["hello", "help"]),
+    )
+    message = prefix_message(".t helo")
+    await ui.handle_prefix_message(bot, message)
+    bot.db.similar_names.assert_awaited_once_with(message.guild.id, "helo")
+    assert message.reply.await_args.args[0] == ui.t(
+        "error.unknown_tag_suggest", names="`hello`, `help`"
+    )
     await bot.close()
 
 

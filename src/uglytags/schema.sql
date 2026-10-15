@@ -69,3 +69,6 @@ CREATE TABLE IF NOT EXISTS tag_uses (
 CREATE INDEX IF NOT EXISTS tag_uses_guild_time ON tag_uses (guild_id, used_at);
 CREATE INDEX IF NOT EXISTS tag_uses_tag_time ON tag_uses (tag_id, used_at);
 CREATE INDEX IF NOT EXISTS tag_uses_used_at ON tag_uses (used_at);
+
+-- Migration 4: trigram similarity for "did you mean" suggestions on unknown tag names.
+CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public;
