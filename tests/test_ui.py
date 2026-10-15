@@ -715,6 +715,74 @@ async def test_create_conflict_without_content_opens_form():
     await bot.close()
 
 
+@pytest.mark.parametrize("command_name", ["add", "create"])
+async def test_prefix_create_on_own_tag_offers_overwrite_or_new_name(command_name):
+    bot = conflict_bot(tag(), taken={"hello1"})
+    attachment = SimpleNamespace(size=4, filename="file.txt", read=AsyncMock(return_value=b"data"))
+    message = prefix_message(f".t {command_name} hello new body", attachments=[attachment])
+    await ui.handle_prefix_message(bot, message)
+    bot.db.create_tag.assert_not_awaited()
+    assert "`hello2`" in message.reply.await_args.args[0]
+    view = message.reply.await_args.kwargs["view"]
+    assert [item.label for item in view.children] == ["Overwrite", "Create as hello2", "Cancel"]
+    assert view.owner_id == 2
+    attachment.read.assert_not_awaited()
+
+    bot.db.get_tag.return_value = None
+    click = button_event()
+    await view.create_as.callback(click)
+    args = bot.db.create_tag.await_args.args
+    assert args[1:] == (1, "hello2", "new body\n{attach:file.txt}", 2, {"file.txt": b"data"})
+    assert "created" in click.edit_original_response.await_args.kwargs["content"]
+    repeat = button_event()
+    await view.overwrite.callback(repeat)
+    repeat.response.defer.assert_awaited_once()
+    assert bot.db.create_tag.await_count == 1
+    bot.db.save_content.assert_not_awaited()
+    await bot.close()
+
+
+@pytest.mark.parametrize(
+    ("row", "permissions", "text", "labels"),
+    [
+        (tag(owner_id=3), {}, "belongs to someone else", ["Create as hello1", "Cancel"]),
+        (
+            tag(owner_id=3),
+            {"administrator": True},
+            "belongs to <@3>",
+            ["Overwrite", "Create as hello1", "Cancel"],
+        ),
+        (tag(is_group=True), {}, "is a tag group", ["Create as hello1", "Cancel"]),
+    ],
+)
+async def test_prefix_create_conflict_choices(row, permissions, text, labels):
+    bot = conflict_bot(row)
+    message = prefix_message(".t add hello body", **permissions)
+    await ui.handle_prefix_message(bot, message)
+    assert text in message.reply.await_args.args[0]
+    view = message.reply.await_args.kwargs["view"]
+    assert [item.label for item in view.children] == labels
+    await bot.close()
+
+
+async def test_prefix_create_conflict_reports_media_error(monkeypatch):
+    bot = conflict_bot(tag())
+    monkeypatch.setattr(
+        ui, "read_uploads", AsyncMock(side_effect=ui.MediaError("error.media_size"))
+    )
+    attachment = SimpleNamespace(size=4, filename="file.txt")
+    message = prefix_message(".t add hello", attachments=[attachment])
+    await ui.handle_prefix_message(bot, message)
+    view = message.reply.await_args.kwargs["view"]
+    click = button_event()
+    await view.create_as.callback(click)
+    ui.read_uploads.assert_awaited_once_with([attachment], bot.max_media_bytes)
+    assert "Each file must be" in click.edit_original_response.await_args.kwargs["content"]
+    assert view.attachments == []
+    bot.db.create_tag.assert_not_awaited()
+    await bot.close()
+
+
 @pytest.mark.parametrize("command_name", ["create", "add"])
 async def test_create_without_conflict_requires_confirmation(command_name):
     bot = conflict_bot(None)

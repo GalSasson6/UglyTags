@@ -30,7 +30,8 @@ delete button is left out.
   to create a tag from the replied message's attachments, first text link, and embed
   media links. Plain text alone is not copied, matching NotSoBot. Attachments are stored
   with the tag; links remain links rather than being downloaded from external hosts.
-  Explicit content or command attachments take priority over the reply.
+  Explicit content or command attachments take priority over the reply. A taken name
+  gets the same overwrite or suggested-name choice as `/tag create`.
   Use the slash commands for forms, filters, imports, exports, groups,
   statistics, and pruning.
 - `.t search name`: list the server's tags whose names contain `name` (case-insensitive),
