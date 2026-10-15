@@ -26,6 +26,11 @@ delete button is left out.
   to three similarly spelled tag names from the server: "Unknown Tag. Did you mean
   `hello`?" NotSoBot only says "Unknown Tag". Matching uses PostgreSQL's
   `pg_trgm` extension, so very short or symbol-only names may get no suggestions.
+  When showing a tag (`.t`, `.t show`, or `/t`), the suggestion comes with a **Show**
+  button, or a menu when there are several. Picking one shows that tag with the
+  arguments and attachment already given; only the person who ran the command can
+  pick. For `.t` the suggestion reply becomes the tag's output; for `/t` the private
+  suggestion is removed and the output is posted as usual.
 - `.t create`, `.t edit`, `.t alias`, `.t rename`, `.t info`, `.t list`, `.t random`,
   and `.t remove`: provide the original bot's core chat management commands. `.t add`,
   `.t delete`, `.t owner`, and `.t raw` remain aliases. Create, edit, and remove always
@@ -98,8 +103,11 @@ delete button is left out.
   list tags. Filters match case-insensitive substrings.
   With a name filter (here or in `.t search`), the results have an **Include similar
   names** button that adds tags with similarly spelled names after the substring
-  matches, and a search that finds nothing shows the similar names instead. NotSoBot
-  has neither.
+  matches, and a search that finds nothing shows the similar names instead. Name
+  search results also have a menu of the current page's tags: picking one shows it
+  (without arguments). From `.t search` the tag's output replaces the list; from
+  `/tag list` it is posted publicly and the private list stays. NotSoBot has none of
+  these.
 - `/tag remove tag name`: removes a tag after confirmation, even for its owner.
 - `/tag remove all [content] [name] [user]`: removes matching tags after confirmation,
   with an option to export them first.

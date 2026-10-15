@@ -57,6 +57,8 @@
   "action.continue": "Continue",
   "action.cancel": "Cancel",
   "action.similar": "Include similar names",
+  "action.show_tag": "Show {name}",
+  "suggest.placeholder": "Pick a tag to show",
   "action.export": "Export",
   "action.overwrite": "Overwrite",
   "action.create_as": "Create as {name}",
