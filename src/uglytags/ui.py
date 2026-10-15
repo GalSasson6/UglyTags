@@ -1311,15 +1311,19 @@ async def prefix_send_list(message: discord.Message, view: ListView):
 
 
 async def prefix_random(bot, message: discord.Message, arguments: str):
-    tag = await bot.db.random(message.guild.id)
+    parsed = prefix_argument(arguments)
+    name, rest = parsed or (None, "")
+    tag = await bot.db.random(message.guild.id, name=name)
     if tag is None:
-        await render.send_message_error(message, t("error.no_tags"))
+        await render.send_message_error(
+            message, t("error.no_matching_tags" if name else "error.no_tags")
+        )
         return
     await execute_message(
         bot,
         message,
         tag,
-        arguments,
+        rest,
         message.attachments[0] if message.attachments else None,
         t("show.random_title", name=code(tag["name"])),
     )

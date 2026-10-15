@@ -32,7 +32,8 @@ delete button is left out.
   pick. For `.t` the suggestion reply becomes the tag's output; for `/t` the private
   suggestion is removed and the output is posted as usual.
 - `.t create`, `.t edit`, `.t alias`, `.t rename`, `.t info`, `.t list`, `.t random`,
-  and `.t remove`: provide the original bot's core chat management commands. `.t add`,
+  and `.t remove`: provide the original bot's core chat management commands. `.t random
+  pizza` picks randomly among tags whose names contain `pizza`. `.t add`,
   `.t delete`, `.t owner`, and `.t raw` remain aliases. Create, edit, and remove always
   ask for confirmation. Create and edit store files attached to the command message.
   Reply with `.t add name` or `.t create name` (without content or command attachments)

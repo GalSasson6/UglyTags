@@ -486,8 +486,9 @@ async def test_prefix_info_list_random_and_remove(monkeypatch):
     await ui.handle_prefix_message(bot, listing)
     assert listing.reply.await_args.kwargs["embed"].title == "User 2's tags (1)"
 
-    random = prefix_message(".t random some arguments")
+    random = prefix_message(".t random hel some arguments")
     await ui.handle_prefix_message(bot, random)
+    bot.db.random.assert_awaited_once_with(1, name="hel")
     execute.assert_awaited_once_with(
         bot, random, row, "some arguments", None, "Showing tag: `hello`"
     )
