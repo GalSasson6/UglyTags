@@ -1,6 +1,10 @@
+import asyncio
+import contextlib
 import io
 import json
 import logging
+import time
+import weakref
 from dataclasses import dataclass, field
 
 import discord
@@ -595,6 +599,137 @@ async def send_error(interaction: discord.Interaction, message: str, embeds=()):
     )
 
 
+REPLY_WINDOW = 15 * 60
+MAX_TRACKED_REPLIES = 1000
+
+
+@dataclass
+class TrackedReply:
+    reply: discord.Message
+    view: weakref.ref | None
+    content: str
+    author_id: int
+    channel_id: int
+    expires: float
+
+    def stop_view(self) -> None:
+        view = self.view() if self.view is not None else None
+        if view is not None:
+            view.stop()
+
+
+class ReplyTracker:
+    """Remembers which bot reply answers which command message, so an edited
+    command updates its reply and a deleted command removes it."""
+
+    def __init__(self):
+        self.entries: dict[int, TrackedReply] = {}
+        self.locks: dict[int, list] = {}
+
+    def get(self, message_id: int) -> TrackedReply | None:
+        entry = self.entries.get(message_id)
+        if entry is not None and entry.expires <= time.monotonic():
+            del self.entries[message_id]
+            return None
+        return entry
+
+    def take(self, message_id: int) -> TrackedReply | None:
+        entry = self.get(message_id)
+        self.entries.pop(message_id, None)
+        return entry
+
+    def put(self, message: discord.Message, reply: discord.Message, view) -> None:
+        now = time.monotonic()
+        self.entries.pop(message.id, None)
+        self.entries[message.id] = TrackedReply(
+            reply,
+            weakref.ref(view) if view is not None else None,
+            message.content,
+            message.author.id,
+            message.channel.id,
+            now + REPLY_WINDOW,
+        )
+        for message_id in [key for key, entry in self.entries.items() if entry.expires <= now]:
+            del self.entries[message_id]
+        while len(self.entries) > MAX_TRACKED_REPLIES:
+            del self.entries[next(iter(self.entries))]
+
+    async def discard(self, message_id: int) -> bool:
+        """Delete a tracked reply. A reply that cannot be deleted stays tracked."""
+        entry = self.take(message_id)
+        if entry is None:
+            return False
+        try:
+            await entry.reply.delete()
+        except discord.NotFound:
+            pass
+        except discord.HTTPException:
+            self.entries[message_id] = entry
+            return False
+        entry.stop_view()
+        return True
+
+    def latest(self, author_id: int, channel_id: int, count: int) -> list[int]:
+        found = []
+        for message_id in sorted(self.entries, reverse=True):
+            entry = self.get(message_id)
+            if entry and entry.author_id == author_id and entry.channel_id == channel_id:
+                found.append(message_id)
+                if len(found) == count:
+                    break
+        return found
+
+    @contextlib.asynccontextmanager
+    async def guard(self, message_id: int):
+        slot = self.locks.setdefault(message_id, [asyncio.Lock(), 0])
+        slot[1] += 1
+        try:
+            async with slot[0]:
+                yield
+        finally:
+            slot[1] -= 1
+            if not slot[1]:
+                self.locks.pop(message_id, None)
+
+
+REPLIES = ReplyTracker()
+
+
+async def respond(message: discord.Message, content: str | None = None, **kwargs):
+    """Reply to a command message, or edit the earlier reply if it already has one."""
+    sent = None
+    view = kwargs.get("view")
+    view = None if view is discord.utils.MISSING else view
+    previous = REPLIES.take(message.id)
+    if previous is not None:
+        previous.stop_view()
+        embeds = kwargs.get("embeds") or ([kwargs["embed"]] if kwargs.get("embed") else [])
+        try:
+            sent = await previous.reply.edit(
+                content=content or None,
+                embeds=embeds,
+                attachments=kwargs.get("files") or [],
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.HTTPException as error:
+            log.debug("Could not edit the earlier reply: %s", error)
+            if error.status != 404:
+                with contextlib.suppress(discord.HTTPException):
+                    await previous.reply.delete()
+    if sent is None:
+        for file in kwargs.get("files") or []:
+            file.reset()
+        sent = await message.reply(
+            content,
+            mention_author=False,
+            allowed_mentions=discord.AllowedMentions.none(),
+            **kwargs,
+        )
+    REPLIES.put(message, sent, view)
+    return sent
+
+
 async def send_message_result(message: discord.Message, rt, result, title: str = ""):
     sent = None
 
@@ -607,11 +742,7 @@ async def send_message_result(message: discord.Message, rt, result, title: str =
         await send_message_error(message, "\n\n".join(part for part in (title, str(error)) if part))
         return
     try:
-        sent = await message.reply(
-            **prepared.send_kwargs(),
-            mention_author=False,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+        sent = await respond(message, **prepared.send_kwargs())
     except discord.HTTPException as error:
         log.warning("Tag response failed: %s", error)
         if prepared.view:
@@ -625,9 +756,4 @@ async def send_message_result(message: discord.Message, rt, result, title: str =
 
 
 async def send_message_error(message: discord.Message, content: str):
-    await message.reply(
-        content[:2000],
-        view=delete_view(message.author.id),
-        mention_author=False,
-        allowed_mentions=discord.AllowedMentions.none(),
-    )
+    await respond(message, content[:2000], view=delete_view(message.author.id))

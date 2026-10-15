@@ -1,3 +1,6 @@
+import asyncio
+import gc
+import itertools
 import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -10,6 +13,13 @@ from uglytags import ui
 from uglytags.bot import UglyTags, parse_import_limits
 from uglytags.transfer import ImportLimits
 from uglytags.ui import TagModal, format_size, name_candidates, save_tag, send_export
+
+MESSAGE_IDS = itertools.count(1000)
+
+
+@pytest.fixture(autouse=True)
+def clear_replies():
+    ui.render.REPLIES.entries.clear()
 
 
 def tag(**overrides):
@@ -75,10 +85,11 @@ def prefix_message(content, user_id=2, attachments=None, **permissions):
         get_member_named=lambda name: author if name == author.display_name else None,
     )
     return SimpleNamespace(
+        id=next(MESSAGE_IDS),
         content=content,
         author=author,
         guild=guild,
-        channel=SimpleNamespace(send=AsyncMock(return_value=AsyncMock())),
+        channel=SimpleNamespace(id=5, send=AsyncMock(return_value=AsyncMock())),
         attachments=attachments or [],
         embeds=[],
         reference=None,
@@ -1271,4 +1282,304 @@ async def test_info_previews_privately_without_counting_a_use():
     assert sent["content"] == "crispy strips"
     assert sent["embeds"][0].title == "bacon"
     assert "`a.mp4`" in sent["embeds"][0].fields[0].value
+    await bot.close()
+
+
+def edited(message, content, minutes=1):
+    message.content = content
+    message.edited_at = datetime.now(UTC)
+    message.created_at = message.edited_at - timedelta(minutes=minutes)
+    return message
+
+
+async def test_edited_command_edits_its_earlier_reply():
+    bot = stats_bot(get_tag=AsyncMock(return_value=None))
+    message = prefix_message(".t first")
+    sent = message.reply.return_value
+    await ui.handle_prefix_message(bot, message)
+    message.reply.assert_awaited_once()
+
+    await ui.handle_prefix_edit(bot, edited(message, ".t second"), None)
+    message.reply.assert_awaited_once()
+    sent.edit.assert_awaited_once()
+    assert sent.edit.await_args.kwargs["content"] == ui.t("error.unknown_tag")
+
+    await ui.handle_prefix_edit(bot, edited(message, ".t second"), None)
+    sent.edit.assert_awaited_once()
+    await bot.close()
+
+
+async def test_edit_replaces_reply_that_can_no_longer_be_edited():
+    bot = stats_bot(get_tag=AsyncMock(return_value=None))
+    message = prefix_message(".t first")
+    old = message.reply.return_value
+    old.edit.side_effect = discord.HTTPException(SimpleNamespace(status=400, reason=""), "bad")
+    await ui.handle_prefix_message(bot, message)
+    await ui.handle_prefix_edit(bot, edited(message, ".t second"), None)
+    old.delete.assert_awaited_once()
+    assert message.reply.await_count == 2
+    await bot.close()
+
+
+async def test_edit_ignores_late_edits_and_unchanged_content():
+    bot = stats_bot(get_tag=AsyncMock(return_value=None))
+    message = prefix_message(".t first")
+    assert not ui.is_current_edit(edited(message, ".t second", minutes=16))
+    assert ui.is_current_edit(edited(message, ".t second"))
+    await ui.handle_prefix_edit(bot, edited(message, ".t second"), ".t second")
+    message.reply.assert_not_awaited()
+    await bot.close()
+
+
+async def test_editing_a_command_into_text_removes_the_reply():
+    bot = stats_bot(get_tag=AsyncMock(return_value=None))
+    message = prefix_message(".t first")
+    sent = message.reply.return_value
+    await ui.handle_prefix_message(bot, message)
+    await ui.handle_prefix_edit(bot, edited(message, "never mind"), None)
+    sent.delete.assert_awaited_once()
+    assert ui.render.REPLIES.get(message.id) is None
+    await bot.close()
+
+
+async def test_deleting_a_command_removes_the_reply():
+    bot = stats_bot(get_tag=AsyncMock(return_value=None))
+    message = prefix_message(".t first")
+    sent = message.reply.return_value
+    await ui.handle_prefix_message(bot, message)
+    await ui.handle_prefix_delete(message.id)
+    sent.delete.assert_awaited_once()
+    await ui.handle_prefix_delete(message.id)
+    sent.delete.assert_awaited_once()
+    await bot.close()
+
+
+async def test_undo_deletes_your_last_replies_and_commands():
+    bot = stats_bot(get_tag=AsyncMock(return_value=None))
+    commands = [prefix_message(f".t tag{number}") for number in range(3)]
+    for command in commands:
+        await ui.handle_prefix_message(bot, command)
+    other = prefix_message(".t other", user_id=9)
+    await ui.handle_prefix_message(bot, other)
+
+    undo = prefix_message(".undo 2")
+    undo.delete = AsyncMock()
+    partial = SimpleNamespace(delete=AsyncMock())
+    undo.channel.get_partial_message = MagicMock(return_value=partial)
+    undo.channel.permissions_for = lambda member: discord.Permissions(manage_messages=True)
+    undo.guild.me = object()
+    assert await ui.handle_prefix_message(bot, undo)
+
+    assert commands[2].reply.return_value.delete.await_count == 1
+    assert commands[1].reply.return_value.delete.await_count == 1
+    commands[0].reply.return_value.delete.assert_not_awaited()
+    other.reply.return_value.delete.assert_not_awaited()
+    assert partial.delete.await_count == 2
+    assert "2 commands" in undo.channel.send.await_args.args[0]
+    assert undo.channel.send.await_args.kwargs["delete_after"] == ui.UNDO_NOTICE_SECONDS
+    undo.delete.assert_awaited_once()
+    undo.reply.assert_not_awaited()
+
+    again = prefix_message(".undo")
+    again.channel.permissions_for = lambda member: discord.Permissions.none()
+    again.guild.me = object()
+    await ui.handle_prefix_message(bot, again)
+    assert commands[0].reply.return_value.delete.await_count == 1
+    assert "Successfully deleted 1 commands" in again.reply.await_args.args[0]
+    await ui.handle_prefix_message(bot, again)
+    assert again.reply.await_args.args[0] == ui.t("undo.none")
+
+    usage = prefix_message(".undo many")
+    await ui.handle_prefix_message(bot, usage)
+    assert "Usage:" in usage.reply.await_args.args[0]
+    await bot.close()
+
+
+async def test_failed_edit_resends_files_from_the_start():
+    message = prefix_message(".t first")
+    old = AsyncMock()
+
+    async def fail(**kwargs):
+        for file in kwargs["attachments"]:
+            file.fp.read()
+        raise discord.HTTPException(SimpleNamespace(status=400, reason=""), "bad")
+
+    old.edit.side_effect = fail
+    ui.render.REPLIES.put(message, old, None)
+    file = ui.render.to_discord_file(ui.tagscript.TagFile("data", "a.txt"))
+    await ui.render.respond(message, "hi", files=[file])
+    assert message.reply.await_args.kwargs["files"][0].fp.read() == b"data"
+
+
+async def test_undo_edited_from_a_replied_command_does_not_wait_on_itself():
+    bot = stats_bot(get_tag=AsyncMock(return_value=None))
+    message = prefix_message(".t first")
+    await ui.handle_prefix_message(bot, message)
+    message.channel.permissions_for = lambda member: discord.Permissions.none()
+    message.guild.me = object()
+    await asyncio.wait_for(ui.handle_prefix_edit(bot, edited(message, ".undo"), None), 2)
+    assert message.reply.await_args.args[0] == ui.t("undo.none")
+    await bot.close()
+
+
+async def test_undo_with_a_huge_number_clamps_instead_of_failing():
+    bot = stats_bot()
+    message = prefix_message(f".undo {'9' * 5000}")
+    message.channel.permissions_for = lambda member: discord.Permissions.none()
+    message.guild.me = object()
+    await ui.handle_prefix_message(bot, message)
+    assert message.reply.await_args.args[0] == ui.t("undo.none")
+    await bot.close()
+
+
+async def test_stale_update_events_do_not_rerun_commands():
+    message = edited(prefix_message(".t first"), ".t first")
+    assert ui.is_current_edit(message)
+    message.edited_at -= timedelta(minutes=5)
+    message.created_at -= timedelta(minutes=5)
+    assert not ui.is_current_edit(message)
+
+
+async def test_edits_of_untracked_non_commands_are_ignored():
+    assert not ui.is_current_edit(edited(prefix_message("hello"), "hello world"))
+    assert ui.is_current_edit(edited(prefix_message("hello"), ".undo"))
+    assert ui.is_prefix_command(".T x") and ui.is_prefix_command(".undo 2")
+    assert not ui.is_prefix_command(".undoing") and not ui.is_prefix_command("hi")
+
+
+async def test_list_reply_without_a_view_can_be_edited_and_deleted():
+    bot = stats_bot(get_tag=AsyncMock(return_value=None))
+    message = prefix_message(".t first")
+    await ui.render.respond(message, "one", view=discord.utils.MISSING)
+    sent = message.reply.return_value
+    await ui.render.respond(message, "two", view=discord.utils.MISSING)
+    assert sent.edit.await_args.kwargs["view"] is None
+    await ui.handle_prefix_delete(message.id)
+    sent.edit.return_value.delete.assert_awaited_once()
+    await bot.close()
+
+
+async def test_edit_without_a_tracked_reply_needs_known_changed_content():
+    bot = stats_bot(get_tag=AsyncMock(return_value=None))
+    message = prefix_message(".t first")
+    await ui.handle_prefix_edit(bot, edited(message, ".t first"), None)
+    await ui.handle_prefix_edit(bot, edited(message, ".t first"), ".t first")
+    message.reply.assert_not_awaited()
+    await ui.handle_prefix_edit(bot, edited(message, ".t first"), "oops")
+    message.reply.assert_awaited_once()
+    await bot.close()
+
+
+async def test_undo_picks_replies_by_command_order_and_keeps_failed_deletes():
+    bot = stats_bot(get_tag=AsyncMock(return_value=None))
+    older, newer = prefix_message(".t a"), prefix_message(".t b")
+    for command in (older, newer):
+        await ui.handle_prefix_message(bot, command)
+    await ui.handle_prefix_edit(bot, edited(older, ".t c"), None)
+    newer_reply = newer.reply.return_value
+    newer_reply.delete.side_effect = discord.Forbidden(SimpleNamespace(status=403, reason=""), "no")
+
+    undo = prefix_message(".undo")
+    undo.channel.permissions_for = lambda member: discord.Permissions.none()
+    undo.guild.me = object()
+    await ui.handle_prefix_message(bot, undo)
+    newer_reply.delete.assert_awaited_once()
+    assert ui.render.REPLIES.get(newer.id) is not None
+    assert "1 messages could not be deleted" in undo.reply.await_args.args[0]
+    await bot.close()
+
+
+async def test_undo_keeps_leading_zero_amounts():
+    bot = stats_bot(get_tag=AsyncMock(return_value=None))
+    commands = [prefix_message(f".t t{number}") for number in range(6)]
+    for command in commands:
+        await ui.handle_prefix_message(bot, command)
+    undo = prefix_message(".undo 00000000000005")
+    undo.channel.permissions_for = lambda member: discord.Permissions.none()
+    undo.guild.me = object()
+    await ui.handle_prefix_message(bot, undo)
+    assert "5 commands" in undo.reply.await_args.args[0]
+    await bot.close()
+
+
+def test_raw_edit_event_carries_the_updated_message():
+    assert "message" in discord.RawMessageUpdateEvent.__slots__
+    assert "cached_message" in discord.RawMessageUpdateEvent.__slots__
+
+
+def payload_for(message, before=None):
+    cached = SimpleNamespace(content=before) if before is not None else None
+    return SimpleNamespace(message=message, cached_message=cached, message_id=message.id)
+
+
+async def test_bot_event_handlers_route_messages_edits_and_deletes():
+    bot = stats_bot(get_tag=AsyncMock(return_value=None))
+    message = prefix_message(".t first")
+    sent = message.reply.return_value
+    await bot.on_message(prefix_message("not a command"))
+    await bot.on_message(message)
+    message.reply.assert_awaited_once()
+
+    await bot.on_raw_message_edit(payload_for(edited(message, "plain text"), ".t first"))
+    sent.delete.assert_awaited_once()
+
+    again = prefix_message(".t one")
+    await bot.on_message(again)
+    await bot.on_raw_message_delete(SimpleNamespace(message_id=again.id))
+    again.reply.return_value.delete.assert_awaited_once()
+
+    many = [prefix_message(".t a"), prefix_message(".t b")]
+    for item in many:
+        await bot.on_message(item)
+    await bot.on_raw_bulk_message_delete(SimpleNamespace(message_ids={item.id for item in many}))
+    for item in many:
+        item.reply.return_value.delete.assert_awaited_once()
+    assert not ui.render.REPLIES.locks
+    await bot.close()
+
+
+async def test_prefix_failures_reply_inside_the_message_guard(monkeypatch):
+    bot = stats_bot()
+    message = prefix_message(".t first")
+    monkeypatch.setattr(ui, "prefix_show", AsyncMock(side_effect=RuntimeError("boom")))
+    await bot.on_message(message)
+    assert message.reply.await_args.args[0] == ui.t("error.generic")
+    assert not ui.render.REPLIES.locks
+    await bot.close()
+
+
+async def test_tracker_holds_views_weakly_and_evicts_by_age_and_count(monkeypatch):
+    tracker = ui.render.ReplyTracker()
+    message = prefix_message(".t first")
+    view = discord.ui.View()
+    tracker.put(message, AsyncMock(), view)
+    entry = tracker.get(message.id)
+    assert entry.view() is view
+    del view
+    gc.collect()
+    entry.stop_view()
+
+    monkeypatch.setattr(ui.render, "MAX_TRACKED_REPLIES", 2)
+    others = [prefix_message(".t x") for _ in range(3)]
+    for other in others:
+        tracker.put(other, AsyncMock(), None)
+    assert list(tracker.entries) == [other.id for other in others[1:]]
+    now = ui.render.time.monotonic()
+    monkeypatch.setattr(ui.render.time, "monotonic", lambda: now + ui.render.REPLY_WINDOW + 1)
+    tracker.put(message, AsyncMock(), None)
+    assert list(tracker.entries) == [message.id]
+
+
+async def test_undo_skips_commands_being_edited_without_waiting():
+    bot = stats_bot(get_tag=AsyncMock(return_value=None))
+    busy, idle = prefix_message(".t a"), prefix_message(".t b")
+    for command in (busy, idle):
+        await ui.handle_prefix_message(bot, command)
+    undo = prefix_message(".undo 2")
+    undo.channel.permissions_for = lambda member: discord.Permissions.none()
+    undo.guild.me = object()
+    async with ui.render.REPLIES.guard(busy.id):
+        await asyncio.wait_for(ui.handle_prefix_message(bot, undo), 2)
+    busy.reply.return_value.delete.assert_not_awaited()
+    idle.reply.return_value.delete.assert_awaited_once()
     await bot.close()

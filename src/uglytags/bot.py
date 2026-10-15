@@ -14,9 +14,17 @@ from uglytags.media import (
     parse_media_limit_mb,
     parse_positive_int,
 )
-from uglytags.render import DeleteButton
+from uglytags.render import REPLIES, DeleteButton, respond
 from uglytags.transfer import ImportLimits
-from uglytags.ui import handle_prefix_message, register_commands, report_error
+from uglytags.ui import (
+    handle_prefix_delete,
+    handle_prefix_edit,
+    handle_prefix_message,
+    is_current_edit,
+    is_prefix_command,
+    register_commands,
+    report_error,
+)
 
 log = logging.getLogger(__name__)
 
@@ -69,15 +77,28 @@ class UglyTags(discord.Client):
         log.info("UglyTags connected to %s servers", len(self.guilds))
 
     async def on_message(self, message: discord.Message):
-        try:
-            await handle_prefix_message(self, message)
-        except Exception:
-            log.exception("Prefix command failed")
-            await message.reply(
-                t("error.generic"),
-                mention_author=False,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+        if is_prefix_command(message.content):
+            await self.run_prefix(message, handle_prefix_message)
+
+    async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent):
+        if is_current_edit(payload.message):
+            before = payload.cached_message.content if payload.cached_message else None
+            await self.run_prefix(payload.message, handle_prefix_edit, before)
+
+    async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent):
+        await handle_prefix_delete(payload.message_id)
+
+    async def on_raw_bulk_message_delete(self, payload: discord.RawBulkMessageDeleteEvent):
+        for message_id in payload.message_ids:
+            await handle_prefix_delete(message_id)
+
+    async def run_prefix(self, message: discord.Message, handler, *args):
+        async with REPLIES.guard(message.id):
+            try:
+                await handler(self, message, *args)
+            except Exception:
+                log.exception("Prefix command failed")
+                await respond(message, t("error.generic"))
 
     @tasks.loop(hours=1)
     async def cleanup(self):

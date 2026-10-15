@@ -36,6 +36,20 @@ delete button is left out.
 - `.t search name`: list the server's tags whose names contain `name` (case-insensitive),
   matching `/tag list server name:`. Quote names containing spaces. Without a name it
   behaves like `.t list`.
+- Editing a `.t` or `.tag` chat command within 15 minutes of sending it
+  updates the bot's earlier reply instead of sending a new one, and editing it into
+  something that is not a command, or deleting it, removes the reply, like NotSoBot.
+  If the new reply cannot replace the old one (for example a Components V2 reply
+  becoming a plain one), the old reply is deleted and a new one is sent. Re-running an
+  edited command counts as another use of the tag. Replies are tracked in memory, so
+  edits made after a restart are not matched to their old replies.
+- `.undo [amount]`: deletes the bot's replies to your last `amount` chat commands in
+  this channel (1 to 5, default 1; only commands from the last 15 minutes, and only
+  since the last restart). When the bot has Manage Messages it also deletes your
+  command messages and the `.undo` message itself, and a short notice ("Successfully
+  deleted N commands.") disappears after one second; without it the notice replies
+  to `.undo`. Editing an `.undo` message runs it again. Unlike NotSoBot it does not
+  cover slash command responses or older commands.
 - **Apps > tag reply**: right-click a message (or long-press on mobile)
   and choose this shortcut (prefixed with a speech-bubble icon). A private form offers your 25 most recently used tags in
   this server, newest first, with optional arguments and one attachment. Submitting

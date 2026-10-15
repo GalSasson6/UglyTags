@@ -88,13 +88,16 @@ async def test_prepare_plain_message_with_files_and_embeds():
 async def test_message_result_uses_send_payload():
     sent = SimpleNamespace(edit=AsyncMock())
     message = SimpleNamespace(
+        id=1,
+        content=".t hi",
         author=SimpleNamespace(id=7),
+        channel=SimpleNamespace(id=5),
         reply=AsyncMock(return_value=sent),
     )
     result = await result_of("hello{attachtext:file body}")
     await render.send_message_result(message, runtime(), result)
+    assert message.reply.await_args.args[0] == "hello"
     kwargs = message.reply.await_args.kwargs
-    assert kwargs["content"] == "hello"
     assert kwargs["files"][0].filename == "content.txt"
     assert "attachments" not in kwargs
     assert not kwargs["mention_author"]
