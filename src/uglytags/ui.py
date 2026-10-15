@@ -737,7 +737,9 @@ async def handle_prefix_edit(bot, message: discord.Message, before: str | None):
 
 
 async def handle_prefix_delete(message_id: int):
+    """A deleted command removes its reply; a deleted reply is no longer tracked."""
     if render.REPLIES.get(message_id) is None and message_id not in render.REPLIES.locks:
+        render.REPLIES.forget_reply(message_id)
         return
     async with render.REPLIES.guard(message_id):
         await render.REPLIES.discard(message_id)
@@ -751,35 +753,54 @@ async def prefix_uploads(bot, message: discord.Message, attachments=None):
     return attachments
 
 
+async def undo_commands(channel, me, user_id: int, amount: int, exclude_id: int | None = None):
+    """Delete the replies to a user's last commands in a channel, newest first.
+
+    Returns the notice text and whether the bot can delete the user's messages."""
+    can_delete = channel.permissions_for(me).manage_messages
+    prefixed = interactions = failed = 0
+    for command_id in render.REPLIES.latest(user_id, channel.id):
+        if prefixed + interactions + failed >= amount:
+            break
+        entry = render.REPLIES.get(command_id)
+        if entry is None or command_id == exclude_id or command_id in render.REPLIES.locks:
+            continue
+        if not await render.REPLIES.discard(command_id):
+            failed += 1
+            continue
+        if not entry.prefixed:
+            interactions += 1
+            continue
+        prefixed += 1
+        if can_delete:
+            try:
+                await channel.get_partial_message(command_id).delete()
+            except discord.NotFound:
+                pass
+            except discord.HTTPException:
+                failed += 1
+    if not (prefixed or interactions or failed):
+        return t("undo.none"), can_delete
+    if prefixed and interactions:
+        text = t("undo.done_both", interactions=interactions, prefixed=prefixed)
+    elif interactions:
+        text = t("undo.done_interactions", interactions=interactions)
+    else:
+        text = t("undo.done", count=prefixed)
+    if failed:
+        text = t("undo.failed", text=text, failed=failed)
+    return text, can_delete
+
+
 async def prefix_undo(message: discord.Message, value: str):
     amount = value.strip() or "1"
     if not amount.isdecimal():
         await prefix_reply(message, t("prefix.usage", usage=".undo [amount]"))
         return
     amount = max(1, min(int(amount.lstrip("0")[:9] or "0"), MAX_UNDO))
-    can_delete = message.channel.permissions_for(message.guild.me).manage_messages
-    deleted = failed = 0
-    latest = render.REPLIES.latest(message.author.id, message.channel.id, amount + 1)
-    for command_id in [found for found in latest if found != message.id][:amount]:
-        if command_id in render.REPLIES.locks:
-            continue
-        if not await render.REPLIES.discard(command_id):
-            failed += 1
-            continue
-        deleted += 1
-        if can_delete:
-            try:
-                await message.channel.get_partial_message(command_id).delete()
-            except discord.NotFound:
-                pass
-            except discord.HTTPException:
-                failed += 1
-    if not deleted and not failed:
-        text = t("undo.none")
-    else:
-        text = t("undo.done", count=deleted)
-        if failed:
-            text = t("undo.failed", text=text, failed=failed)
+    text, can_delete = await undo_commands(
+        message.channel, message.guild.me, message.author.id, amount, message.id
+    )
     options = {
         "allowed_mentions": discord.AllowedMentions.none(),
         "delete_after": UNDO_NOTICE_SECONDS,
@@ -1649,6 +1670,18 @@ def register_commands(bot):
             ephemeral=True,
             wait=True,
         )
+
+    @group.command(name="undo", description=t("command.undo"))
+    @app_commands.describe(amount=t("option.undo_amount", max=MAX_UNDO))
+    async def undo(
+        interaction: discord.Interaction,
+        amount: app_commands.Range[int, 1, MAX_UNDO] = 1,
+    ):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        text, _ = await undo_commands(
+            interaction.channel, interaction.guild.me, interaction.user.id, amount
+        )
+        await reply(interaction, text)
 
     @group.command(name="export", description=t("command.export"))
     @app_commands.describe(

@@ -307,7 +307,13 @@ async def test_recent_reply_card_and_ping_work_with_all_output_types(script, bot
     )
     assert card.author.name == "sour kraut\u2004\u21a9\ufe0f"
     assert card.author.icon_url == target.author.display_avatar.url
-    event = SimpleNamespace(edit_original_response=AsyncMock())
+    event = SimpleNamespace(
+        id=1,
+        created_at=discord.utils.utcnow(),
+        user=SimpleNamespace(id=7),
+        channel_id=1,
+        edit_original_response=AsyncMock(),
+    )
     result = await result_of(script)
     await render.send_result(event, runtime(), result, reply_message=target)
     kwargs = event.edit_original_response.await_args.kwargs

@@ -575,7 +575,7 @@ async def send_result(
                 users=[reply_message.author] if not reply_message.author.bot else False,
                 replied_user=False,
             )
-        await interaction.edit_original_response(**kwargs)
+        sent = await interaction.edit_original_response(**kwargs)
     except discord.HTTPException as error:
         log.warning("Tag response failed: %s", error)
         if prepared.view:
@@ -588,18 +588,25 @@ async def send_result(
         return
     if separate_lead:
         await interaction.followup.send(embed=lead_embed, ephemeral=True)
+    if lead_embed is None:
+        REPLIES.put_interaction(interaction, sent, prepared.view)
 
 
 async def send_error(interaction: discord.Interaction, message: str, embeds=()):
-    await interaction.edit_original_response(
+    """Show a tag error. Private previews pass their lead embed; public output passes
+    none and is tracked so undo can remove it."""
+    sent = await interaction.edit_original_response(
         content=message[:2000],
         embeds=list(embeds),
         attachments=[],
         view=delete_view(interaction.user.id),
     )
+    if not embeds:
+        REPLIES.put_interaction(interaction, sent)
 
 
 REPLY_WINDOW = 15 * 60
+TOKEN_MARGIN = 30
 MAX_TRACKED_REPLIES = 1000
 
 
@@ -610,7 +617,8 @@ class TrackedReply:
     content: str
     author_id: int
     channel_id: int
-    expires: float
+    expires: float = 0.0
+    prefixed: bool = True
 
     def stop_view(self) -> None:
         view = self.view() if self.view is not None else None
@@ -639,18 +647,43 @@ class ReplyTracker:
         return entry
 
     def put(self, message: discord.Message, reply: discord.Message, view) -> None:
-        now = time.monotonic()
-        self.entries.pop(message.id, None)
-        self.entries[message.id] = TrackedReply(
-            reply,
-            weakref.ref(view) if view is not None else None,
-            message.content,
-            message.author.id,
-            message.channel.id,
-            now + REPLY_WINDOW,
+        self.store(
+            message.id,
+            TrackedReply(
+                reply,
+                weakref.ref(view) if view is not None else None,
+                message.content,
+                message.author.id,
+                message.channel.id,
+            ),
         )
-        for message_id in [key for key, entry in self.entries.items() if entry.expires <= now]:
-            del self.entries[message_id]
+
+    def put_interaction(self, interaction: discord.Interaction, sent, view=None) -> None:
+        """Track a public slash command response so undo can remove it.
+
+        It is deleted through the interaction token, which works even where the bot
+        cannot view the channel, so tracking ends shortly before the token expires."""
+        age = (discord.utils.utcnow() - interaction.created_at).total_seconds()
+        self.store(
+            interaction.id,
+            TrackedReply(
+                sent,
+                weakref.ref(view) if view is not None else None,
+                "",
+                interaction.user.id,
+                interaction.channel_id,
+                prefixed=False,
+            ),
+            REPLY_WINDOW - TOKEN_MARGIN - age,
+        )
+
+    def store(self, key: int, entry: TrackedReply, lifetime: float = REPLY_WINDOW) -> None:
+        now = time.monotonic()
+        entry.expires = now + lifetime
+        self.entries.pop(key, None)
+        self.entries[key] = entry
+        for expired in [item for item, value in self.entries.items() if value.expires <= now]:
+            del self.entries[expired]
         while len(self.entries) > MAX_TRACKED_REPLIES:
             del self.entries[next(iter(self.entries))]
 
@@ -669,15 +702,23 @@ class ReplyTracker:
         entry.stop_view()
         return True
 
-    def latest(self, author_id: int, channel_id: int, count: int) -> list[int]:
-        found = []
-        for message_id in sorted(self.entries, reverse=True):
-            entry = self.get(message_id)
-            if entry and entry.author_id == author_id and entry.channel_id == channel_id:
-                found.append(message_id)
-                if len(found) == count:
-                    break
-        return found
+    def forget_reply(self, reply_id: int) -> None:
+        """Stop tracking a reply that was deleted some other way."""
+        for key, entry in self.entries.items():
+            if entry.reply.id == reply_id:
+                del self.entries[key]
+                entry.stop_view()
+                return
+
+    def latest(self, author_id: int, channel_id: int) -> list[int]:
+        """A user's tracked commands in a channel, newest first."""
+        return [
+            key
+            for key in sorted(self.entries, reverse=True)
+            if (entry := self.get(key))
+            and entry.author_id == author_id
+            and entry.channel_id == channel_id
+        ]
 
     @contextlib.asynccontextmanager
     async def guard(self, message_id: int):

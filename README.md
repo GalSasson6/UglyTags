@@ -43,13 +43,14 @@ delete button is left out.
   becoming a plain one), the old reply is deleted and a new one is sent. Re-running an
   edited command counts as another use of the tag. Replies are tracked in memory, so
   edits made after a restart are not matched to their old replies.
-- `.undo [amount]`: deletes the bot's replies to your last `amount` chat commands in
-  this channel (1 to 5, default 1; only commands from the last 15 minutes, and only
-  since the last restart). When the bot has Manage Messages it also deletes your
-  command messages and the `.undo` message itself, and a short notice ("Successfully
-  deleted N commands.") disappears after one second; without it the notice replies
-  to `.undo`. Editing an `.undo` message runs it again. Unlike NotSoBot it does not
-  cover slash command responses or older commands.
+- `.undo [amount]`: deletes the bot's replies to your last `amount` commands in this
+  channel, counting both chat commands and public slash command tag output (`/t`,
+  `/tag random`, and tag reply). The amount is 1 to 5, default 1, and only commands
+  from the last 15 minutes since the last restart count. When the bot has Manage
+  Messages it also deletes your chat command messages and the `.undo` message itself,
+  and a short notice saying how many commands and slash interactions were deleted
+  disappears after one second; without it the notice replies to `.undo`. Editing an `.undo` message runs
+  it again. Unlike NotSoBot it does not reach commands older than 15 minutes.
 - **Apps > tag reply**: right-click a message (or long-press on mobile)
   and choose this shortcut (prefixed with a speech-bubble icon). A private form offers your 25 most recently used tags in
   this server, newest first, with optional arguments and one attachment. Submitting
@@ -88,6 +89,9 @@ delete button is left out.
 - `/tag remove tag name`: removes a tag after confirmation, even for its owner.
 - `/tag remove all [content] [name] [user]`: removes matching tags after confirmation,
   with an option to export them first.
+- `/tag undo [amount]`: the slash version of `.undo`, answered privately. It deletes
+  the bot's replies to your last commands in this channel, but cannot delete chat
+  command messages without Manage Messages, the same as `.undo`.
 - `/tag export [content] [name] [user]`: exports matching tags as JSON.
 - `/tag import file`: imports a NotSoBot or UglyTags export. To move your tags to
   another server, run `/tag export` in the old server and `/tag import` in the new one.
